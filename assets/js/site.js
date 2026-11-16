@@ -2,9 +2,30 @@ const root = document.documentElement;
 const media = matchMedia('(prefers-color-scheme: dark)');
 let preference = 'system';
 try { preference = localStorage.getItem('cnpg-mode') || 'system'; } catch {}
-function applyMode() { root.dataset.mode = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference; document.querySelector('.mode-toggle')?.setAttribute('aria-label', `Current theme: ${root.dataset.mode}. Switch to ${root.dataset.mode === 'dark' ? 'light' : 'dark'} mode`); }
+if (!['system', 'light', 'dark'].includes(preference)) preference = 'system';
+const themeButton = document.querySelector('.theme-switcher');
+const themeModes = ['system', 'light', 'dark'];
+function applyMode() {
+ root.dataset.mode = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference;
+ const next = themeModes[(themeModes.indexOf(preference) + 1) % themeModes.length];
+ const label = `Theme: ${preference === 'system' ? 'System (automatic)' : preference === 'light' ? 'Light' : 'Dark'}. Switch to ${next === 'system' ? 'System' : next === 'light' ? 'Light' : 'Dark'}.`;
+ if (themeButton) {
+  themeButton.title = label;
+  themeButton.setAttribute('aria-label', label);
+  themeButton.querySelectorAll('[data-theme-icon]').forEach(icon => { icon.hidden = icon.dataset.themeIcon !== preference; });
+ }
+}
 applyMode(); media.addEventListener('change', applyMode);
-document.querySelector('.mode-toggle')?.addEventListener('click', () => { preference = root.dataset.mode === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('cnpg-mode', preference); } catch {} applyMode(); });
+themeButton?.addEventListener('click', () => {
+ preference = themeModes[(themeModes.indexOf(preference) + 1) % themeModes.length];
+ try { localStorage.setItem('cnpg-mode', preference); } catch {}
+ applyMode();
+});
+window.addEventListener('storage', event => {
+ if (event.key !== 'cnpg-mode' && event.key !== null) return;
+ preference = ['light', 'dark'].includes(event.newValue) ? event.newValue : 'system';
+ applyMode();
+});
 const menu = document.getElementById('menu-toggle');
 menu?.addEventListener('click', () => { const nav = document.getElementById('mobile-nav'); nav.hidden = !nav.hidden; menu.setAttribute('aria-expanded', String(!nav.hidden)); });
 async function copyText(text, button, code) {
