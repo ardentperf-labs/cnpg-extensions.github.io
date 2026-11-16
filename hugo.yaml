@@ -1,4 +1,4 @@
-baseURL: https://cnpg-extensions.github.io/cnpg-extensions-website/
+baseURL: https://cnpg-extensions.github.io/
 locale: en-US
 title: CNPG Extensions
 theme: hextra

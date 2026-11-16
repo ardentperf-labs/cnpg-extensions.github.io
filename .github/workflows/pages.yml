@@ -36,7 +36,7 @@ jobs:
       - name: Refresh catalog, READMEs, SBOMs, container notices, and advisory matches
         run: python scripts/generate.py --refresh --scan --workers 4
       - name: Build Hugo
-        run: hugo --minify --baseURL 'https://cnpg-extensions.github.io/cnpg-extensions-website/'
+        run: hugo --minify --baseURL 'https://cnpg-extensions.github.io/'
       - name: Validate generated output
         run: python scripts/check-site.py public
       - uses: actions/upload-pages-artifact@v3

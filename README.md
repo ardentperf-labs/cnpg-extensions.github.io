@@ -69,7 +69,7 @@ GitHub's scheduled workflows can be delayed and may be disabled after repository
 inactivity. Dates stay visible; old scan results are not relabeled current.
 
 The configured base URL is
-`https://cnpg-extensions.github.io/cnpg-extensions-website/`. Change both Hugo config
+`https://cnpg-extensions.github.io/`. Change both Hugo config
 and the workflow build argument if the repository/domain changes. Enable Pages
 before the first deploy. The `github-pages` environment may need approval if the
 repository owner configures protection rules.
