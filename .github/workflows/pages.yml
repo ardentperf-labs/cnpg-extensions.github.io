@@ -2,7 +2,6 @@ name: Build and publish website
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
   schedule:
     - cron: '30 10 * * *'
