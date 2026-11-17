@@ -83,7 +83,8 @@ Scanner failures remain explicit and do not become zero findings. Revisit the wo
 ## GitHub Pages
 
 In repository Settings → Pages, choose **GitHub Actions** as the source. The workflow
-builds on main, on pull requests (no deploy), manually, and nightly at 10:30 UTC.
+builds on main, manually, and nightly at 10:30 UTC. Pull requests do not run this
+workflow; run the local validation commands before pushing.
 Nightly builds fetch fresh source/catalog revisions and update Grype's database.
 GitHub's scheduled workflows can be delayed and may be disabled after repository
 inactivity. Dates stay visible; old scan results are not relabeled current.
