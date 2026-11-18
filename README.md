@@ -71,7 +71,9 @@ finishes, the website workflow runs regardless of its outcome. Collection failur
 remain failed Actions runs, with an error annotation; the website summary links to
 the unsuccessful run. Enable GitHub Actions failure notifications to receive alerts.
 The site uses the latest successful snapshot, never partially collected history.
-The chained trigger becomes active once the workflow is on the default branch.
+Both workflows queue overlapping runs instead of replacing pending runs (up to
+GitHub's 100-run queue limit). The chained trigger becomes active once the workflow
+is on the default branch.
 
 ## Sources of truth
 
