@@ -41,7 +41,25 @@ jobs:
           restore-keys: history-progress-v1-${{ runner.os }}-
       - name: Refresh all extension histories
         id: history
-        run: python scripts/preview-versions.py --all --catalog .cache/history-catalog.json --history-file .cache/version-history/history.json
+        run: |
+          python - <<'PYTEST'
+          import importlib.util, sys
+          sys.path.insert(0, 'scripts')
+          spec = importlib.util.spec_from_file_location('history', 'scripts/preview-versions.py')
+          history = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(history)
+          original = history.refresh_entry
+          count = 0
+          def fail_after_first(*args, **kwargs):
+              global count
+              if count:
+                  raise RuntimeError('INTENTIONAL LAB TEST: fail after one extension')
+              original(*args, **kwargs)
+              count += 1
+          history.refresh_entry = fail_after_first
+          sys.argv = ['preview-versions.py', '--all', '--catalog', '.cache/history-catalog.json', '--history-file', '.cache/version-history/history.json']
+          history.main()
+          PYTEST
       - name: Save private history progress
         if: ${{ always() && (steps.history.outcome == 'success' || steps.history.outcome == 'failure') && hashFiles('.cache/version-history/history.json') != '' }}
         uses: actions/cache/save@v4
