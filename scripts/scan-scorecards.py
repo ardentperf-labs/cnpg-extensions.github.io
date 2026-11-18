@@ -42,14 +42,12 @@ def scan(repository, binary, output, timeout):
     try:
         result = subprocess.run([binary, '--repo='+repository, '--show-details', '--format=json'],
                                 capture_output=True, text=True, timeout=timeout)
-        if result.returncode:
-            return {'status': 'unavailable', 'reason': f'Scorecard exited with code {result.returncode}',
-                    'diagnostic': diagnostic(result.stderr)}
         try:
             report = json.loads(result.stdout)
         except ValueError:
             return {'status': 'unavailable', 'reason': 'Invalid JSON from Scorecard',
-                    'diagnostic': diagnostic(result.stderr + '\n' + result.stdout)}
+                    'diagnostic': diagnostic(result.stderr + '\n' + result.stdout),
+                    'exitCode': result.returncode}
         if not isinstance(report.get('checks'), list) or not report['checks']:
             raise ValueError('No check results')
         if not report.get('repo', {}).get('commit') or not report.get('date'):
@@ -57,7 +55,9 @@ def scan(repository, binary, output, timeout):
         filename = hashlib.sha256(repository.encode()).hexdigest()+'.json'
         (output/filename).write_text(result.stdout)
         return {'status': 'available', 'report': filename, 'date': report['date'],
-                'inconclusiveChecks': sum(c.get('score', -1) < 0 for c in report['checks'])}
+                'inconclusiveChecks': sum(c.get('score', -1) < 0 for c in report['checks']),
+                'exitCode': result.returncode,
+                **({'diagnostic': diagnostic(result.stderr)} if result.returncode else {})}
     except (subprocess.TimeoutExpired, ValueError, OSError) as exc:
         return {'status': 'unavailable', 'reason': type(exc).__name__}
 
