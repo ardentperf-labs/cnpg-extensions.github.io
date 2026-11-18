@@ -13,6 +13,7 @@ permissions:
 concurrency:
   group: versions-history-${{ github.ref }}
   cancel-in-progress: false
+  queue: max
 jobs:
   collect:
     runs-on: ubuntu-24.04
