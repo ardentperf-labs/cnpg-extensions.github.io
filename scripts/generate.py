@@ -5,7 +5,7 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
 from image_notices import container_notices
-from osv_scan import scan_osv
+from osv_scan import scan_osv, refresh_database
 from guide_layout import getting_started
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, parse_qs, unquote, quote
@@ -56,6 +56,29 @@ def advisory_url(package):
         if source: return 'https://security-tracker.debian.org/tracker/source-package/'+quote(source,safe='')
     return ''
 
+def crate_url(package):
+    """Link crates.io identities using the installed version from SPDX."""
+    for ref in package.get('externalRefs', []):
+        if ref.get('referenceType') != 'purl':
+            continue
+        identity, _, query = ref.get('referenceLocator', '').partition('?')
+        if not identity.startswith('pkg:cargo/') or parse_qs(query).get('repository_url'):
+            continue
+        name, sep, version = identity.removeprefix('pkg:cargo/').rpartition('@')
+        if sep and name and version:
+            return 'https://crates.io/crates/' + quote(unquote(name), safe='') + '/' + quote(unquote(version), safe='')
+    return ''
+
+def image_package_url(reference):
+    """Use the catalog image repository rather than the extension recipe name."""
+    if not reference.startswith('ghcr.io/'):
+        return ''
+    repository = reference.removeprefix('ghcr.io/').split('@', 1)[0].split(':', 1)[0]
+    owner, sep, name = repository.partition('/')
+    if not owner or not sep or not name:
+        return ''
+    return 'https://github.com/orgs/' + quote(owner, safe='') + '/packages/container/package/' + quote(name, safe='')
+
 def package_ecosystem(package):
     for ref in package.get('externalRefs', []):
         if ref.get('referenceType') == 'purl':
@@ -69,7 +92,7 @@ def packages(spdx):
     return sorted([{'name':p['name'],'version':p.get('versionInfo','Not recorded'),
                     'declared':p.get('licenseDeclared','NOASSERTION'),
                     'concluded':p.get('licenseConcluded','NOASSERTION'),
-                    'files':p.get('licenseInfoFromFiles',[]),'ecosystem':package_ecosystem(p),'advisoryURL':advisory_url(p)} for p in spdx.get('packages',[])],key=lambda p:(p['name'],p['version']))
+                    'files':p.get('licenseInfoFromFiles',[]),'ecosystem':package_ecosystem(p),'packageURL':crate_url(p),'advisoryURL':advisory_url(p)} for p in spdx.get('packages',[])],key=lambda p:(p['name'],p['version']))
 
 def notice_files(spdx):
     """Find notice paths in the shipped-file inventory, not embedded license records."""
@@ -128,7 +151,7 @@ def scan(sbom, grype, database):
             'findings':sorted(findings.values(),key=lambda v:(v['severity'],v['id'],v['package'])),
             'report':str(dest.relative_to(ROOT/'static'))}
 
-def inspect_image(item, grype, database):
+def inspect_image(item, grype, database, osv_database=None):
     result={**item,'platforms':[]}
     try:
         reg=Registry(item['reference']);index=reg.get(reg.digest)
@@ -157,7 +180,7 @@ def inspect_image(item, grype, database):
                 record.update(status='available',packages=packages(spdx),licenses=spdx.get('hasExtractedLicensingInfos',[]),sbom=str(dest.relative_to(ROOT/'static')))
                 try: record['scan']=scan(dest,grype,database)
                 except Exception as ex: record['scan']={'status':'unavailable','reason':str(ex)}
-                record['osvScan']=scan_osv(dest,ROOT,shutil.which('osv-scanner') if grype else None)
+                record['osvScan']=scan_osv(dest,ROOT,shutil.which('osv-scanner') if grype else None,osv_database)
             except Exception as ex: record['reason']=str(ex)
             result['platforms'].append(record)
         result['status']='available'
@@ -253,15 +276,17 @@ def main():
             p=subprocess.run([grype,'db','update'],capture_output=True,text=True)
             if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
             else: database=json.loads(run(grype,'db','status','-o','json'))
+        osv_database=refresh_database(ROOT) if args.scan else None
         images=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures=[pool.submit(inspect_image,j,grype,database) for j in jobs]
+            futures=[pool.submit(inspect_image,j,grype,database,osv_database) for j in jobs]
             for f in concurrent.futures.as_completed(futures):
                 image=f.result();images.append(image)
                 print(f"{len(images)}/{len(jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
         evidence_file.write_text(json.dumps({'images':images,'database':database}))
     # Rebuild display fields from original SPDX, including during local evidence reuse.
     for image in images:
+        image['packageURL'] = image_package_url(image['reference'])
         for platform in image['platforms']:
             if platform['status']=='available':
                 spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())

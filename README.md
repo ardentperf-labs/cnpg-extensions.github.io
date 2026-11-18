@@ -19,7 +19,7 @@ python scripts/install-tools.py
 export PATH="$PWD/.tools:$PATH"
 python scripts/generate.py --refresh --scan
 hugo --minify
-hugo server --bind 0.0.0.0 --baseURL http://localhost:8766/ --port 8766 --appendPort=false
+hugo server --renderToMemory --bind 0.0.0.0 --baseURL http://localhost:8766/ --port 8766 --appendPort=false
 ```
 
 For a quicker content/layout iteration, omit `--scan` (results explicitly say
@@ -27,6 +27,31 @@ not run), or reuse the existing generated data and run just Hugo. Omitting
 `--refresh` uses the existing cached source checkouts. Production always refreshes
 sources and scans. Do not commit generated data or reports; reproduce them at build
 time. Full reports are available as downloads in the published site.
+
+The local Hugo server also exposes a Versions tab design preview. To populate an
+extension with its timestamp-tagged GHCR history, run:
+
+```sh
+.venv/bin/python scripts/preview-versions.py semver
+```
+
+This fetches published image metadata, excludes signature/attestation tags and
+mutable aliases, and writes ignored `data/version_history.json`. Re-run to refresh;
+errors preserve the previous history. Normal refreshes list tags, reuse saved manifest
+metadata and verified GitHub links, and fetch only new records or records whose
+catalog digest changed. Removed tags disappear from the next successful refresh.
+Timestamped historical tags are treated as append-only; use `--full-refresh` to
+recheck all tag mappings and links (including any historical retagging). Keep
+`data/version_history.json` between runs to retain the cache. Other extensions show their current catalog
+images until explicitly fetched locally. Actions runs `scripts/preview-versions.py --all`
+after catalog generation and restores/saves `data/version_history.json` across runs.
+Extensions refresh sequentially; each successful refresh is saved atomically. If a
+later extension fails, completed work is still cached, while the failed extension's
+previous record is retained and the build stops. A cold or evicted cache requires
+initial history collection. Manual runs can enable **Refetch all version-history
+metadata and image links** to bypass restoration. Bump the workflow's `versions-v1`
+cache namespace if the persisted format becomes incompatible.
+The Versions tab itself remains excluded from production builds.
 
 ## Sources of truth
 
@@ -38,7 +63,8 @@ time. Full reports are available as downloads in the published site.
   with `cloudnative-pg/postgres-extensions-containers` for upstream-published images.
 - Current versions: published OCI annotations or config labels, **not** a recipe
   version that may not have shipped yet. Trixie is the card's preferred variant;
-  detail pages select one distribution and architecture at a time.
+  detail pages select one distribution and architecture at a time. Image details
+  link to the catalog image’s GHCR package page for published versions.
 - Package versions and licenses: digest-checked BuildKit SPDX attestations, per
   architecture. Preserve declared/concluded expressions, file licenses, and custom
   license definitions without inferring missing terms. Unknown stays unknown.
@@ -49,7 +75,9 @@ time. Full reports are available as downloads in the published site.
   Grype plus OSV for Cargo packages (identified by SPDX package URLs). It shows
   Yes if a relevant scanner finds advisories, No when all relevant scans complete
   without findings, and Unknown otherwise,
-  with exact-version Cargo links and Debian source-package tracker links derived
+  with exact-version crates.io links on Cargo package names and deps.dev links
+  on their advisory indicators (retaining its advisory and OpenSSF Scorecard context),
+  plus Debian source-package tracker links derived
   from SPDX package URLs. Missing scan results remain uncounted; external results
   may differ. No CVE table is rendered. Matches
   are not exploitability verdicts; scans exclude the separate PostgreSQL base image.
@@ -74,7 +102,11 @@ SBOM format; do not rewrite Debian package identities to accommodate a scanner.
 
 The generator currently updates Grype's database once, then runs the documented
 JSON SBOM scan for each platform with automatic database updates disabled so the
-batch uses the same database. OSV-Scanner runs the documented JSON command as a temporary
+batch uses the same database. OSV refreshes the Cargo and Debian database archives
+once per build, then scans all SBOMs with `--offline` against that fixed snapshot.
+Refresh failures produce unavailable OSV results; stale databases are not silently reused.
+Database hashes and refresh time are recorded with each scan in generated data.
+OSV-Scanner runs the documented JSON command as a temporary
 supplement for the missing direct RustSec feed tracked in
 [Grype #529](https://github.com/anchore/grype/issues/529); its findings contribute to a Yes/No/Unknown indicator alongside Grype.
 No combined numeric count is displayed because scanner findings can overlap.
@@ -128,5 +160,13 @@ The original downloadable SBOM retains any embedded license records. Retrieval f
 from an inspected image with no notice files.
 
 Generation requires an accessible Docker daemon (provided by the Ubuntu GitHub
-Actions runner). Local notice results are cached by immutable platform digest in
-`.cache/image-notices-v1`; new image digests are extracted on subsequent builds.
+Actions runner). Successful notice results are cached by immutable platform digest
+in `.cache/image-notices-v1` and persisted between GitHub Actions builds. Restored
+results skip Docker pull, create, and export entirely; new digests are extracted
+and failures are retried on the next build. Cache eviction can require extraction
+again. Changes to `scripts/image_notices.py` automatically invalidate the CI cache.
+
+To force extraction for all current images, manually run the website workflow with
+**Re-extract license notices from every current image** enabled. This bypasses the
+notice-cache restore and saves fresh results for subsequent builds. Locally, remove
+`.cache/image-notices-v1` before generation. Advisory scans still refresh normally.
