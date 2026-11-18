@@ -153,8 +153,10 @@ repository owner configures protection rules.
 
 Fatal catalog/README parsing failures stop the build and preserve the previous
 site. Individual registry/SBOM/scan failures appear as unavailable, not zero CVEs.
-Grype DB update failures likewise produce unavailable results. Immutable registry
-blobs are cached across builds; advisory scans are rerun rather than cached.
+The distributed workflow requires verified matching advisory snapshots; a database
+refresh failure stops the build. Local whole-catalog generation marks those scans
+unavailable. Immutable registry blobs are cached across builds; advisory scans are
+rerun rather than cached.
 
 ## Build performance
 
@@ -188,6 +190,26 @@ Generator logs include `PROFILE phase` wall times and cumulative per-function ti
 Cumulative times overlap across workers and must not be added to calculate wall time.
 Local `python scripts/generate.py --refresh --scan` still runs the whole catalog in
 one process; the workflow distributes that same work across runners.
+
+Measured on November 18, 2026 with warmed assets, 103 extensions, 204 current
+catalog images, and 408 platform SBOMs. These are whole-workflow elapsed times
+from creation through completion, including setup and artifact transfers:
+
+| Version | Elapsed | Run |
+| --- | --- | --- |
+| Upstream main with timing instrumentation | 21m15s | [Baseline](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44264693999) |
+| Optimized build | 3m51s | [First verification](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44268457014) |
+| Same code, restoring the new workflow's cache | 3m50s | [Repeat verification](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44269092794) |
+
+The baseline spent 19m07s generating data, including 3m54s in serial history
+retrieval, and 78s validating HTML. The optimized scan jobs spent 42–68s refreshing
+advisories, 53–66s inspecting images and running Grype, and 7–11s running OSV;
+these jobs overlap. History finished alongside scans. Final assembly, Hugo,
+validation and uploads took about 50s including its job setup, with HTML validation
+around 9s. Both final runs retained 408 Grype results, 374 OSV results and 34 explicit
+OSV unavailable results (30 SBOMs without package URLs and four requiring an
+unavailable ecosystem database). Cold/full-cache rebuilds are not covered by this
+under-five-minute measurement.
 
 ## Validation
 
