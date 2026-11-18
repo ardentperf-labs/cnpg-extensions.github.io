@@ -164,7 +164,9 @@ inputs in groups of at most 512 unchanged SBOMs. Advisory databases are refreshe
 on every run. The assembly job accepts only a complete set of fresh evidence from
 that workflow run, with exact catalog coverage, matching source commits and matching
 advisory database identities. Missing shards, mismatched snapshots, or missing
-reports stop the build. Existing scan timestamps and per-platform reports are preserved.
+reports stop the build. If upstream commits or advisory archives change during a
+run, rerun the entire workflow so every shard uses the new snapshot; retrying just
+failed jobs can retain mismatched evidence from successful jobs. Existing scan timestamps and per-platform reports are preserved.
 
 Grype 0.121.3 hashes its multi-gigabyte database twice per invocation. Its
 `GRYPE_DB_VALIDATE_BY_HASH_ON_START=false` option still computes those hashes but

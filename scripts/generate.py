@@ -4,6 +4,7 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 """
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
+from collections import Counter
 from build_timing import timed, phase
 from evidence_shards import database_identity, merge_shards, shard_path
 from image_notices import container_notices
@@ -328,6 +329,10 @@ def main():
             platform['osvScan'] = osv_results[ROOT / 'static' / platform['sbom']]
     if not (args.reuse_evidence or args.evidence_only):
         evidence_file.write_text(json.dumps({'images':images,'database':database}))
+    for scanner in ('scan', 'osvScan'):
+        counts = Counter(p.get(scanner, {}).get('status', 'missing') for image in images
+                         for p in image['platforms'] if p['status'] == 'available')
+        print(f'EVIDENCE {scanner}: {json.dumps(counts, sort_keys=True)}', flush=True)
     # Rebuild display fields from original SPDX, including during local evidence reuse.
     if not args.evidence_only:
         for image in images:
