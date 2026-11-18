@@ -13,3 +13,5 @@ static/catalog.json
 content/getting-started.md
 
 scorecard-results/
+data/version_history.json
+data/version_history.tmp
