@@ -77,6 +77,30 @@ class OSVTests(unittest.TestCase):
             self.assertEqual(result[good]['status'], 'scanned')
             self.assertEqual(result[bad]['status'], 'unavailable')
 
+    def test_ecosystem_errors_do_not_become_clean_results_in_mixed_batch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good, bad = (root / 'static' / name for name in ('good.spdx.json', 'bad.spdx.json'))
+            good.parent.mkdir()
+            good.touch()
+            bad.touch()
+            def entry(path, ecosystem):
+                return {'source': {'type': 'sbom', 'path': str(path)}, 'packages': [
+                    {'package': {'name': 'example', 'version': '1', 'ecosystem': ecosystem}}]}
+            raw = {'results': [entry(good, 'Debian:12'), entry(bad, 'GitHub Actions')]}
+            for code in (1, 127):
+                response = SimpleNamespace(returncode=code, stdout=json.dumps(raw), stderr=
+                    'Error during extraction: could not load db for GitHub Actions ecosystem: unavailable')
+                with self.subTest(code=code), patch('osv_scan.subprocess.run', return_value=response):
+                    result = scan_osv_batch([good, bad], root, 'osv-scanner')
+                self.assertEqual(result[good]['status'], 'scanned')
+                self.assertEqual(result[bad]['status'], 'unavailable')
+                self.assertNotIn('findings', result[bad])
+            response.stderr = 'Unexpected extraction failure'
+            with patch('osv_scan.subprocess.run', return_value=response):
+                result = scan_osv_batch([good, bad], root, 'osv-scanner')
+            self.assertTrue(all(r['status'] == 'unavailable' for r in result.values()))
+
     def test_failed_refresh_prevents_scanning_stale_database(self):
         with patch('osv_scan.subprocess.run') as run:
             sbom = Path('unused')

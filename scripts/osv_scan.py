@@ -1,6 +1,7 @@
 """Run the documented OSV supplement against an unchanged SPDX document."""
 import json
 import os
+import re
 import hashlib
 import zipfile
 from pathlib import Path
@@ -84,7 +85,17 @@ def scan_batch(sboms, root, executable, database):
             midpoint = len(sboms) // 2
             left = scan_batch(sboms[:midpoint], root, executable, database)
             return {**left, **scan_batch(sboms[midpoint:], root, executable, database)}
-        if result.returncode not in (0, 1):
+        failed_ecosystems = set()
+        for line in result.stderr.splitlines():
+            if not line.strip():
+                continue
+            match = re.search(r'could not load db for (.+?) ecosystem:', line)
+            if not match:
+                raise RuntimeError('OSV scanner error: ' + line[-400:])
+            failed_ecosystems.add(match[1].partition(':')[0])
+        # OSV can return findings (1) despite an ecosystem extraction failure,
+        # or 127 when the remaining sources are clean. Neither proves full coverage.
+        if result.returncode not in (0, 1) and not (result.returncode == 127 and failed_ecosystems):
             raise RuntimeError(result.stderr[-400:] or f'OSV-Scanner exited with code {result.returncode}')
         raw = json.loads(result.stdout)
         if not isinstance(raw, dict) or not isinstance(raw.get('results'), list):
@@ -109,6 +120,11 @@ def scan_batch(sboms, root, executable, database):
             packages = entry.get('packages')
             if not isinstance(packages, list) or not packages:
                 raise ValueError('OSV report lacks packages for this SPDX source')
+            ecosystems = {package.get('package', {}).get('ecosystem', '').partition(':')[0]
+                          for package in packages}
+            if failed_ecosystems and ('' in ecosystems or ecosystems & failed_ecosystems):
+                raise ValueError('OSV database unavailable for source ecosystem: ' +
+                                 ', '.join(sorted(failed_ecosystems & ecosystems or failed_ecosystems)))
             vulnerable = [package for package in packages if package.get('vulnerabilities')]
             report_data = {'results': [{**entry, 'packages': vulnerable}] if vulnerable else []}
             if 'experimental_config' in raw:
