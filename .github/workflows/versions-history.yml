@@ -56,3 +56,8 @@ jobs:
           path: .cache/history-release/version-history.json
           if-no-files-found: error
           retention-days: 90
+      - name: Report history refresh failure
+        if: ${{ failure() }}
+        run: |
+          echo "::error::Versions history refresh failed, possibly after partial progress. No snapshot from this run is eligible for the website."
+          echo "History refresh failed. Saved private progress can be reused on the next attempt. The website will still build using the latest successful snapshot, or current catalog if none exists." >> "$GITHUB_STEP_SUMMARY"

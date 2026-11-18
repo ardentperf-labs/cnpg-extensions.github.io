@@ -49,7 +49,7 @@ publish and install steps validate and atomically install a complete snapshot.
 Publication requires the completion receipt written by a successful `--all` run;
 its hashes must match both the candidate history and the input catalog.
 
-History collection is independent of site builds. The **Refresh versions history**
+History collection and site publishing use separate, chained workflows. The **Refresh versions history**
 workflow runs daily at 09:30 UTC or manually. It incrementally updates the private
 `.cache/version-history/history.json` cache. Successful extensions remain cached
 if a later extension fails, but no public snapshot is uploaded unless the full
@@ -66,8 +66,12 @@ Malformed snapshots stop the site build, preserving the deployed site. If no
 successful snapshot exists yet (or all have expired), the site builds with current
 catalog data only. The Versions tab appears in production once a snapshot exists.
 Artifacts are retained for 90 days; collection failures leave the last successful
-snapshot available for subsequent site builds. No site build is triggered by history
-collection; the next ordinary site build picks up the snapshot.
+snapshot available for subsequent site builds. When history collection on `main`
+finishes, the website workflow runs regardless of its outcome. Collection failures
+remain failed Actions runs, with an error annotation; the website summary links to
+the unsuccessful run. Enable GitHub Actions failure notifications to receive alerts.
+The site uses the latest successful snapshot, never partially collected history.
+The chained trigger becomes active once the workflow is on the default branch.
 
 ## Sources of truth
 
@@ -131,7 +135,8 @@ Scanner failures remain explicit and do not become zero findings. Revisit the wo
 ## GitHub Pages
 
 In repository Settings → Pages, choose **GitHub Actions** as the source. The workflow
-builds on main, manually, and nightly at 10:30 UTC. Pull requests do not run this
+builds on pushes to main, manually, and after the daily 09:30 UTC history
+workflow finishes (whether it succeeds or fails). Pull requests do not run this
 workflow; run the local validation commands before pushing.
 Nightly builds fetch fresh source/catalog revisions and update Grype's database.
 GitHub's scheduled workflows can be delayed and may be disabled after repository

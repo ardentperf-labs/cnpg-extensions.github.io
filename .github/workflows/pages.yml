@@ -8,8 +8,10 @@ on:
         description: Re-extract license notices from every current image
         type: boolean
         default: false
-  schedule:
-    - cron: '30 10 * * *'
+  workflow_run:
+    workflows: [Refresh versions history]
+    types: [completed]
+    branches: [main]
 permissions:
   contents: read
   actions: read
@@ -21,6 +23,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Report unsuccessful history refresh
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success' }}
+        env:
+          HISTORY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HISTORY_RESULT: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          echo "::warning::Versions history refresh ended with $HISTORY_RESULT. Building with the latest successful snapshot, or current catalog if none exists."
+          echo "History refresh: [$HISTORY_RESULT]($HISTORY_RUN_URL). This build uses the latest successful snapshot, or current catalog if none exists." >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
         with:
           submodules: recursive
