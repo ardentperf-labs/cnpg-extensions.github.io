@@ -4,6 +4,7 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 """
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
+from build_timing import timed
 from image_notices import container_notices
 from osv_scan import scan_osv, refresh_database
 from guide_layout import getting_started
@@ -31,6 +32,7 @@ def source_refresh_time(refreshed, commits, previous, now):
         return previous.get('refreshedAt')
     return None
 
+@timed("checkout")
 def checkout(name, refresh):
     path = CACHE/name
     if not (path/'.git').exists():
@@ -124,6 +126,7 @@ class Registry:
         r=self.session.get('https://ghcr.io/token',params={'service':'ghcr.io','scope':f'repository:{self.repo}:pull'},timeout=60)
         r.raise_for_status()
         self.session.headers.update({'Authorization':'Bearer '+r.json()['token'], 'Accept':'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'})
+    @timed("registry asset")
     def get(self,digest,kind='manifests'):
         dest=CACHE/'oci'/digest.replace(':','-')
         if dest.exists() and not self.refresh: data=dest.read_bytes()
@@ -134,6 +137,7 @@ class Registry:
         check_digest(data,digest)
         return json.loads(data)
 
+@timed("scan")
 def scan(sbom, grype, database):
     if not grype: return {'status':'not-run','reason':'Vulnerability scanning was not requested.'}
     if database.get('error'): return {'status':'unavailable','reason':database['error']}
@@ -152,6 +156,7 @@ def scan(sbom, grype, database):
             'findings':sorted(findings.values(),key=lambda v:(v['severity'],v['id'],v['package'])),
             'report':str(dest.relative_to(ROOT/'static'))}
 
+@timed("inspect_image")
 def inspect_image(item, grype, database, osv_database=None, refresh=False):
     result={**item,'platforms':[]}
     try:
@@ -189,6 +194,7 @@ def inspect_image(item, grype, database, osv_database=None, refresh=False):
     except Exception as ex: result.update(status='unavailable',reason=str(ex),version='Unavailable')
     return result
 
+@timed("readme_html")
 def readme_html(text, repo, commit, path, routes, depth=2):
     html=markdown.markdown(text,extensions=['fenced_code','tables','toc'])
     soup=BeautifulSoup(html,'html.parser')
@@ -288,7 +294,7 @@ def main():
             p=subprocess.run([grype,'db','update'],capture_output=True,text=True)
             if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
             else: database=json.loads(run(grype,'db','status','-o','json'))
-        osv_database=refresh_database(ROOT) if args.scan else None
+        osv_database=timed("OSV database refresh")(refresh_database)(ROOT) if args.scan else None
         images=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
             futures=[pool.submit(inspect_image,j,grype,database,osv_database,j['name']==args.refresh_extension) for j in jobs]
@@ -309,7 +315,7 @@ def main():
         pending=[]
         for image in images:
             for platform in image['platforms']:
-                pending.append((platform, pool.submit(container_notices,
+                pending.append((platform, pool.submit(timed("notices")(container_notices),
                     image['reference'], platform['architecture'], platform['digest'], CACHE,
                     refresh=image['name']==args.refresh_extension)))
         for platform, future in pending:
@@ -348,9 +354,9 @@ def main():
             tab_body=readme_html(text,repo,recipe['commit'],recipe['path'],routes,depth=3)
             (tab_directory/'index.md').write_text('---\n'+yaml.safe_dump(tab_fm,sort_keys=False)+'---\n'+tab_body+'\n')
     from scorecard_data import generate_scorecards
-    generate_scorecards()
+    timed("scorecards")(generate_scorecards)()
     from version_history import generate_history
-    generate_history(entries, refresh_extension=args.refresh_extension)
+    timed("history")(generate_history)(entries, refresh_extension=args.refresh_extension)
     result={'generatedAt':NOW,'sourceRefreshedAt':source_refreshed_at,'commits':commits,'count':len(entries),'extensions':entries,'database':database}
     (ROOT/'data').mkdir(exist_ok=True)
     (ROOT/'data/generated.json').write_text(json.dumps(result))
