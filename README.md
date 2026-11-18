@@ -156,6 +156,36 @@ site. Individual registry/SBOM/scan failures appear as unavailable, not zero CVE
 Grype DB update failures likewise produce unavailable results. Immutable registry
 blobs are cached across builds; advisory scans are rerun rather than cached.
 
+## Build performance
+
+The website workflow distributes current catalog images across four scan jobs.
+Each job runs the pinned, unmodified Grype once per platform and batches OSV
+inputs in groups of at most 512 unchanged SBOMs. Advisory databases are refreshed
+on every run. The assembly job accepts only a complete set of fresh evidence from
+that workflow run, with exact catalog coverage, matching source commits and matching
+advisory database identities. Missing shards, mismatched snapshots, or missing
+reports stop the build. Existing scan timestamps and per-platform reports are preserved.
+
+Grype 0.121.3 hashes its multi-gigabyte database twice per invocation. Its
+`GRYPE_DB_VALIDATE_BY_HASH_ON_START=false` option still computes those hashes but
+suppresses integrity errors, so the website keeps integrity validation enabled.
+The separate runners distribute this cost without changing vulnerability matching.
+More current images require proportionally more scan work; increase both the workflow
+matrix and `--shard-count` together when more runner capacity is needed. This uses
+more concurrent runners and some extra setup/download time in exchange for lower
+wall time. First builds and full cache rebuilds still retrieve all immutable assets.
+
+Each completed scan job uploads its evidence and retrieved assets for one day. The
+assembly job consolidates reusable assets into the existing seven-day artifact,
+including on failed builds where partial assets are available. Advisory scan results
+are never reused from an earlier workflow run. History retrieval uses four concurrent
+workers and per-extension files; HTML validation parses each page once.
+
+Generator logs include `PROFILE phase` wall times and cumulative per-function times.
+Cumulative times overlap across workers and must not be added to calculate wall time.
+Local `python scripts/generate.py --refresh --scan` still runs the whole catalog in
+one process; the workflow distributes that same work across runners.
+
 ## Validation
 
 ```sh

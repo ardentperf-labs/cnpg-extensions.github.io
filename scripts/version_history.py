@@ -34,8 +34,11 @@ def atomic_json(path, value):
 
 class HistoryCache:
     def __init__(self, history_path=None):
-        self.path = Path(history_path) if history_path else ROOT / '.cache/version-history/history.json'
-        self.per_extension = history_path is None
+        default_path = ROOT / '.cache/version-history/history.json'
+        self.path = Path(history_path) if history_path else default_path
+        self.per_extension = self.path.resolve() == default_path.resolve()
+        if self.per_extension:
+            self.path = default_path
         self.aggregate = None
 
     def entry_path(self, name):

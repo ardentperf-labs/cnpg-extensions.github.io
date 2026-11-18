@@ -5,6 +5,7 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
 from build_timing import timed, phase
+from evidence_shards import database_identity, merge_shards, shard_path
 from image_notices import container_notices
 from osv_scan import scan_osv_batch, refresh_database
 from guide_layout import getting_started
@@ -238,15 +239,35 @@ def readme_html(text, repo, commit, path, routes, depth=2):
     return bleach.clean(str(soup),tags=tags,attributes={'*':['id','class'],'a':['href','title','target','rel'],'img':['src','alt','width','height'],'details':['open'],'span':['class','aria-hidden']},protocols=['http','https','mailto'],strip=True)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--refresh',action='store_true');parser.add_argument('--scan',action='store_true');parser.add_argument('--workers',type=int,default=4);parser.add_argument('--reuse-evidence',action='store_true',help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
+    parser=argparse.ArgumentParser();parser.add_argument('--refresh',action='store_true');parser.add_argument('--scan',action='store_true');parser.add_argument('--workers',type=int,default=4)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--reuse-evidence', action='store_true', help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
+    mode.add_argument('--evidence-only', action='store_true', help='Scan one catalog partition and save its evidence and notices')
+    mode.add_argument('--merge-evidence', action='store_true', help='Validate and assemble scanned catalog partitions')
+    parser.add_argument('--shard-index', type=int, help='Zero-based index of the partition to scan')
+    parser.add_argument('--shard-count', type=int, help='Total number of catalog partitions')
     parser.add_argument('--rebuild-cache', action='store_true', help='Ignore saved OCI assets, license notices, and version history')
     parser.add_argument('--refresh-extension', help='Refetch saved assets for one catalog extension')
-    args=parser.parse_args();CACHE.mkdir(exist_ok=True)
+    args=parser.parse_args()
     if args.refresh_extension and args.reuse_evidence:
         parser.error('--refresh-extension cannot be combined with --reuse-evidence')
+    if args.evidence_only:
+        if not args.scan:
+            parser.error('--evidence-only requires --scan')
+        if args.shard_count is None or args.shard_index is None or not 0 <= args.shard_index < args.shard_count:
+            parser.error('--evidence-only requires a shard index between zero and shard count minus one')
+    elif args.shard_index is not None or args.shard_count is not None:
+        parser.error('--shard-index and --shard-count require --evidence-only')
+    if args.merge_evidence and args.scan:
+        parser.error('--merge-evidence already consumes scanned evidence')
+    if args.rebuild_cache and (args.reuse_evidence or args.merge_evidence):
+        parser.error('--rebuild-cache requires fresh evidence collection')
+
+    CACHE.mkdir(exist_ok=True)
+    if args.evidence_only:
+        output_shard = shard_path(CACHE, args.shard_index)
+        output_shard.unlink(missing_ok=True)
     if args.rebuild_cache:
-        if args.reuse_evidence:
-            parser.error('--rebuild-cache cannot be combined with --reuse-evidence')
         for name in ('oci', 'image-notices-v1', 'version-history'):
             shutil.rmtree(CACHE / name, ignore_errors=True)
     with phase("source refresh"):
@@ -256,20 +277,6 @@ def main():
         source_refreshed_at=source_refresh_time(args.refresh, commits, previous, NOW)
         if args.refresh:
             refresh_record.write_text(json.dumps({'commits':commits,'refreshedAt':source_refreshed_at}))
-    recipes={};routes={}
-    for src in ['upstream','source']:
-        for path in (CACHE/src).rglob('metadata.hcl'):
-            if '.git' in path.parts:continue
-            try:
-                with path.open() as f: meta=hcl2.load(f,serialization_options=SerializationOptions(strip_string_quotes=True,with_comments=False)).get('metadata',{})
-            except Exception: continue
-            name=meta.get('name') or meta.get('image_name')
-            if not isinstance(name,str) or not (path.parent/'README.md').exists():continue
-            rel=(path.parent/'README.md').relative_to(CACHE/src).as_posix()
-            recipes[(REPOS[src],name)]={'meta':meta,'readme':path.parent/'README.md','repo':REPOS[src],'commit':commits[src],'path':rel,
-                'build':meta.get('build_system') or ('PGRX' if rel.startswith('pgrx/') else 'Universe' if rel.startswith('universe/') else 'Debian')}
-            routes[(REPOS[src],rel)]='extensions/'+name
-        routes[(REPOS[src],'README.md')]='get-started'
     jobs=[]
     for cat in sorted((CACHE/'artifacts/image-catalogs-extensions').glob('catalog-*.yaml')):
         document=yaml.safe_load(cat.read_text());distro=document['metadata']['labels']['images.cnpg.io/os']
@@ -282,11 +289,19 @@ def main():
     if args.refresh_extension and args.refresh_extension not in {j['name'] for j in jobs}:
         parser.error('Unknown catalog extension: ' + args.refresh_extension)
     evidence_file=CACHE/'inspected.json'
-    if args.reuse_evidence:
+    if args.merge_evidence:
+        with phase("evidence assembly"):
+            images, database = merge_shards(CACHE, jobs, commits, ROOT / 'static')
+    elif args.reuse_evidence:
         saved=json.loads(evidence_file.read_text());images=saved['images'];database=saved['database']
         if sorted((x['name'],x['pg'],x['distro'],x['reference']) for x in images)!=sorted((x['name'],x['pg'],x['distro'],x['reference']) for x in jobs):
             raise RuntimeError('Cached evidence does not match current catalogs; regenerate it')
     else:
+        scan_jobs = jobs
+        if args.evidence_only:
+            if args.shard_count > len(jobs):
+                parser.error('--shard-count exceeds the number of catalog images')
+            scan_jobs = jobs[args.shard_index::args.shard_count]
         grype=shutil.which('grype') if args.scan else None
         if args.scan and (not grype or not shutil.which('osv-scanner')):raise RuntimeError('--scan requires Grype and OSV-Scanner')
         with phase("advisory refresh"):
@@ -296,28 +311,32 @@ def main():
                 if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
                 else: database=json.loads(run(grype,'db','status','-o','json'))
             osv_database=timed("OSV database refresh")(refresh_database)(ROOT) if args.scan else None
+            if args.evidence_only:
+                database_identity(database, osv_database)
         images=[]
         with phase("image inspection and Grype"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-                futures=[pool.submit(inspect_image,j,grype,database,j['name']==args.refresh_extension) for j in jobs]
+                futures=[pool.submit(inspect_image,j,grype,database,j['name']==args.refresh_extension) for j in scan_jobs]
                 for f in concurrent.futures.as_completed(futures):
                     image=f.result();images.append(image)
-                    print(f"{len(images)}/{len(jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
+                    print(f"{len(images)}/{len(scan_jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
         platforms = [p for image in images for p in image['platforms'] if p['status'] == 'available']
         with phase("OSV batch scan"):
             osv_results = scan_osv_batch([ROOT / 'static' / p['sbom'] for p in platforms],
                                         ROOT, shutil.which('osv-scanner') if args.scan else None, osv_database)
         for platform in platforms:
             platform['osvScan'] = osv_results[ROOT / 'static' / platform['sbom']]
+    if not (args.reuse_evidence or args.evidence_only):
         evidence_file.write_text(json.dumps({'images':images,'database':database}))
     # Rebuild display fields from original SPDX, including during local evidence reuse.
-    for image in images:
-        image['packageURL'] = image_package_url(image['reference'])
-        for platform in image['platforms']:
-            if platform['status']=='available':
-                spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())
-                platform['packages']=packages(spdx)
-                platform['noticeFiles']=notice_files(spdx)
+    if not args.evidence_only:
+        for image in images:
+            image['packageURL'] = image_package_url(image['reference'])
+            for platform in image['platforms']:
+                if platform['status']=='available':
+                    spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())
+                    platform['packages']=packages(spdx)
+                    platform['noticeFiles']=notice_files(spdx)
     # Read shipped notices for every publisher, independently of SBOM availability.
     with phase("license notices"):
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
@@ -326,10 +345,30 @@ def main():
                 for platform in image['platforms']:
                     pending.append((platform, pool.submit(timed("notices")(container_notices),
                         image['reference'], platform['architecture'], platform['digest'], CACHE,
-                        refresh=image['name']==args.refresh_extension)))
+                        refresh=image['name']==args.refresh_extension and not args.merge_evidence)))
             for platform, future in pending:
                 platform['containerNotices']=future.result()
+    if args.evidence_only:
+        output_shard.write_text(json.dumps({'shardIndex': args.shard_index, 'shardCount': args.shard_count,
+                                           'commits': commits, 'database': database,
+                                           'osvDatabase': osv_database, 'images': images}))
+        return
+
     with phase("page content"):
+        recipes={};routes={}
+        for src in ['upstream','source']:
+            for path in (CACHE/src).rglob('metadata.hcl'):
+                if '.git' in path.parts:continue
+                try:
+                    with path.open() as f: meta=hcl2.load(f,serialization_options=SerializationOptions(strip_string_quotes=True,with_comments=False)).get('metadata',{})
+                except Exception: continue
+                name=meta.get('name') or meta.get('image_name')
+                if not isinstance(name,str) or not (path.parent/'README.md').exists():continue
+                rel=(path.parent/'README.md').relative_to(CACHE/src).as_posix()
+                recipes[(REPOS[src],name)]={'meta':meta,'readme':path.parent/'README.md','repo':REPOS[src],'commit':commits[src],'path':rel,
+                    'build':meta.get('build_system') or ('PGRX' if rel.startswith('pgrx/') else 'Universe' if rel.startswith('universe/') else 'Debian')}
+                routes[(REPOS[src],rel)]='extensions/'+name
+            routes[(REPOS[src],'README.md')]='get-started'
         entries=[]
         content=ROOT/'content/extensions';content.mkdir(parents=True,exist_ok=True)
         for old in content.glob('*/index.md'): old.unlink()

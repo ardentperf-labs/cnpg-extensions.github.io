@@ -77,6 +77,15 @@ class HistoryGenerationTests(unittest.TestCase):
                 history.refresh_entry(entries[1], full_refresh=True)
             refresh.assert_called_once_with(entries[1], RECORD, full_refresh=True)
 
+    def test_explicit_default_path_updates_the_migrated_cache(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(history, 'ROOT', Path(directory)):
+            default = history.HistoryCache()
+            default.save('one', RECORD)
+            updated = {**RECORD, 'fetchedAt': '2026-11-19T00:00:00Z'}
+            explicit = history.HistoryCache(default.path)
+            explicit.save('one', updated)
+            self.assertEqual(history.HistoryCache().load('one'), updated)
+
     def test_install_validates_all_entries_before_replacing_hugo_data(self):
         with tempfile.TemporaryDirectory() as directory:
             destination = Path(directory) / 'hugo.json'
