@@ -31,6 +31,7 @@ time. Full reports are available as downloads in the published site.
 The website generator retrieves assets directly and saves them for reuse. The nightly
 website workflow restores the previous `website-assets-v1-*` artifact, runs the
 generator, and uploads the resulting assets again with **seven-day retention**.
+New working branches can also restore compatible assets from the default branch.
 There is no separate history workflow or snapshot publication step.
 
 Saved assets include digest-addressed OCI metadata/SBOMs, extracted license notices,
@@ -45,8 +46,11 @@ to discover older additions and remove deleted tags. Incremental runs retain old
 cached records, so deletions can remain visible until reconciliation. Explicit full
 refreshes also refetch known manifests. Timestamped tags are otherwise treated as
 immutable. GitHub page ordering is an observed website behavior, not an OCI API
-contract; malformed pages and failed retrievals fail the build. History updates
-remain serial, preserving completed extensions without concurrent cache writes.
+contract; malformed pages and failed retrievals fail the build. History updates use four concurrent retrieval workers and a single cache-writing
+coordinator. Each extension has its own cache file, avoiding repeated parsing and
+rewriting of the entire catalog history as the number of images grows. Legacy
+aggregate caches are migrated automatically; completed extensions remain saved
+when another retrieval fails.
 
 Advisory databases refresh and scans rerun each
 build so new advisories are detected for unchanged images. Source checkouts refresh
@@ -120,7 +124,10 @@ SBOM format; do not rewrite Debian package identities to accommodate a scanner.
 The generator currently updates Grype's database once, then runs the documented
 JSON SBOM scan for each platform with automatic database updates disabled so the
 batch uses the same database. OSV refreshes the Cargo and Debian database archives
-once per build, then scans all SBOMs with `--offline` against that fixed snapshot.
+once per build, then scans all SBOMs together with `--offline` against that fixed snapshot, loading
+each advisory database once per batch instead of once per platform. Results are
+attributed by the scanner's source path; each platform retains its own findings and
+downloadable report.
 Refresh failures produce unavailable OSV results; stale databases are not silently reused.
 Database hashes and refresh time are recorded with each scan in generated data.
 OSV-Scanner runs the documented JSON command as a temporary

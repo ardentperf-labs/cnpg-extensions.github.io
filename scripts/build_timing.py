@@ -1,6 +1,7 @@
 """Thread-safe aggregate timings for build profiling (durations overlap across workers)."""
 import atexit
 from collections import defaultdict
+from contextlib import contextmanager
 from functools import wraps
 from threading import Lock
 from time import perf_counter
@@ -33,3 +34,12 @@ def report():
 
 
 atexit.register(report)
+
+
+@contextmanager
+def phase(name):
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        print(f"PROFILE phase {name}: {perf_counter() - started:.2f}s wall", flush=True)
