@@ -85,18 +85,27 @@ class HistoryTests(unittest.TestCase):
         with patch.object(history, 'build_tags', return_value=[]):
             self.assertEqual(history.refresh_repository(registry, [old]), [])
 
-    def test_all_command_refreshes_catalog_entries_in_order(self):
+    def test_all_command_refreshes_catalog_entries_and_installs_in_order(self):
         import json
         import tempfile
         from unittest.mock import patch, call
-        entries=[{'name':'one'},{'name':'two'}]
+        entries = [{'name': 'one'}, {'name': 'two'}]
+        record = {'fetchedAt': '2026-11-18T00:00:00Z', 'builds': []}
         with tempfile.TemporaryDirectory() as directory:
-            root=Path(directory)
-            (root/'data').mkdir()
-            (root/'data/generated.json').write_text(json.dumps({'extensions':entries}))
-            with patch.object(history,'ROOT',root), patch.object(sys,'argv',['preview-versions.py','--all','--full-refresh']), patch.object(history,'refresh_entry') as refresh, patch.object(history,'install_history'):
+            root = Path(directory)
+            cache = root / 'custom.json'
+            destination = root / 'data/version_history.json'
+            destination.parent.mkdir()
+            (root / 'data/generated.json').write_text(json.dumps({'extensions': entries}))
+            argv = ['preview-versions.py', '--all', '--full-refresh', '--history-file', str(cache)]
+            with patch.object(history, 'ROOT', root), patch.object(sys, 'argv', argv), patch.object(history, 'fetch_entry', return_value=record) as refresh:
                 history.main()
-            self.assertEqual(refresh.call_args_list,[call(entries[0],True),call(entries[1],True)])
+            refresh.assert_has_calls([
+                call(entries[0], {}, full_refresh=True, manifest_workers=1),
+                call(entries[1], {}, full_refresh=True, manifest_workers=1),
+            ], any_order=True)
+            self.assertEqual(json.loads(cache.read_text()), {'one': record, 'two': record})
+            self.assertEqual(list(json.loads(destination.read_text())), ['one', 'two'])
 
     def test_refresh_failure_preserves_persisted_history(self):
         import json

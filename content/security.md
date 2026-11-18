@@ -199,25 +199,20 @@ done
 osv-scanner scan source --offline -L image.spdx.json
 ```
 
-To save a machine-readable report:
-
-Refresh the Cargo and Debian databases once before scanning. These commands use
-the same database layout as the website build:
-
-```sh
-export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/.cache/osv-local-db"
-for ecosystem in crates.io Debian; do
-  destination="$OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY/osv-scalibr/$ecosystem"
-  mkdir -p "$destination"
-  curl --fail --location "https://osv-vulnerabilities.storage.googleapis.com/$ecosystem/all.zip" -o "$destination/all.zip"
-done
-```
+To save a machine-readable report, run the scanner against the same SBOM:
 
 ```sh
 osv-scanner scan source --offline -L image.spdx.json --format json > osv-results.json
 ```
 
-Keep the `.spdx.json` filename so OSV-Scanner recognizes the format. It matches package versions against the downloaded databases without network requests; no Cargo.lock or source checkout is needed. Exit code `1` means findings were returned. Refresh the databases before each build; unchanged images can acquire newly disclosed vulnerabilities. A failed refresh makes OSV results unavailable rather than silently using stale data.
+Keep the `.spdx.json` filename so OSV-Scanner recognizes the format. It matches package versions against the downloaded databases without network requests. Exit code `1` means findings were returned.
+
+The website build scans multiple SPDX files together using repeated `-L` arguments
+and `--all-packages` to identify the source of each result, including sources
+with no findings. Each platform has its own downloadable report. OSV results are
+unavailable if the scanner omits a platform's SPDX file or a database refresh
+fails. The databases refresh before each build because unchanged images can
+acquire newly disclosed vulnerabilities.
 
 {{< /disclosure >}}
 

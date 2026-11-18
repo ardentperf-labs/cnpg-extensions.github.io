@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Hosted integration check: populate real caches, then prove reuse on a fresh runner."""
 import json
-from pathlib import Path
 import sys
 from unittest.mock import patch
 import requests
@@ -35,7 +34,7 @@ elif phase == 'restore':
     registry = Registry(saved['entry']['variants'][0]['reference'])
     with patch.object(registry.session, 'get', side_effect=AssertionError('Unexpected OCI fetch')):
         registry.get(registry.digest)
-    before = json.loads((ROOT / '.cache/version-history/history.json').read_text())['semver']['builds']
+    before = history.HistoryCache().load('semver')['builds']
     with patch.object(history, 'read_build', side_effect=AssertionError('Unexpected manifest fetch')) as manifests, patch.object(history, 'add_image_links', side_effect=AssertionError('Unexpected GitHub HTML fetch')) as links:
         history.refresh_entry(saved['entry'])
         manifests.assert_not_called()
@@ -45,7 +44,7 @@ elif phase == 'restore':
         assert notice == saved['notices']
         run.assert_not_called()
         output.assert_not_called()
-    after = json.loads((ROOT / '.cache/version-history/history.json').read_text())['semver']['builds']
+    after = history.HistoryCache().load('semver')['builds']
     assert before == after, 'Unchanged history must preserve all records'
     print(f'WARM CACHE VERIFIED: {len(after)} history records; zero manifest fetches, zero GitHub page fetches, zero Docker commands.', flush=True)
 else:
