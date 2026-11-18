@@ -25,6 +25,14 @@ def catalog_names(directory):
     return names
 
 
+def diagnostic(text):
+    # Never persist authentication material, even if a tool includes it in an error.
+    for name in ('GITHUB_AUTH_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN', 'GITLAB_AUTH_TOKEN'):
+        if os.environ.get(name):
+            text = text.replace(os.environ[name], '[REDACTED]')
+    return text[-6000:]
+
+
 def scan(repository, binary, output, timeout):
     host = urlsplit(repository).netloc
     if host not in ('github.com', 'gitlab.com'):
@@ -35,8 +43,13 @@ def scan(repository, binary, output, timeout):
         result = subprocess.run([binary, '--repo='+repository, '--show-details', '--format=json'],
                                 capture_output=True, text=True, timeout=timeout)
         if result.returncode:
-            return {'status': 'unavailable', 'reason': f'Scorecard exited with code {result.returncode}'}
-        report = json.loads(result.stdout)
+            return {'status': 'unavailable', 'reason': f'Scorecard exited with code {result.returncode}',
+                    'diagnostic': diagnostic(result.stderr)}
+        try:
+            report = json.loads(result.stdout)
+        except ValueError:
+            return {'status': 'unavailable', 'reason': 'Invalid JSON from Scorecard',
+                    'diagnostic': diagnostic(result.stderr + '\n' + result.stdout)}
         if not isinstance(report.get('checks'), list) or not report['checks']:
             raise ValueError('No check results')
         if not report.get('repo', {}).get('commit') or not report.get('date'):
@@ -71,8 +84,13 @@ def main():
     if any(output.iterdir()):
         parser.error('Output directory must be empty to prevent stale reports')
     repositories = sorted({mappings[n]['repository'] for n in targets if n in mappings})
+    def run(repository):
+        result = scan(repository, args.binary, output, args.timeout)
+        print(repository + ': ' + result['status'], flush=True)
+        return result
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
-        results = dict(zip(repositories, pool.map(lambda r: scan(r, args.binary, output, args.timeout), repositories)))
+        results = dict(zip(repositories, pool.map(run, repositories)))
     entries = {n: {**mappings.get(n, {}), **results.get(mappings.get(n, {}).get('repository'),
                {'status': 'unavailable', 'reason': 'No reviewed upstream repository mapping'})} for n in targets}
     catalog_commit = subprocess.check_output(['git', '-C', args.catalog_dir, 'rev-parse', 'HEAD'], text=True).strip()
