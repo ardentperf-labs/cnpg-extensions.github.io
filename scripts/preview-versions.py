@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fetch timestamp-tagged GHCR history for the local-only Versions preview."""
 import argparse
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import hashlib
@@ -9,6 +10,7 @@ import re
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlsplit
+from version_history_snapshot import mark_complete
 from generate import ROOT, Registry, check_digest, image_package_url
 
 BUILD_TAG = re.compile(r'^.+-\d{12}-\d+-(?:bookworm|trixie)$')
@@ -110,9 +112,10 @@ def refresh_repository(registry, previous, current_digests=None, full_refresh=Fa
     return builds
 
 
-def refresh_entry(entry, full_refresh=False):
+def refresh_entry(entry, full_refresh=False, history_path=None):
     repositories = {v['reference'].split('@')[0].split(':')[0] for v in entry['variants']}
-    path = ROOT / 'data/version_history.json'
+    path = Path(history_path) if history_path else ROOT / '.cache/version-history/history.json'
+    path.parent.mkdir(parents=True, exist_ok=True)
     history = json.loads(path.read_text()) if path.exists() else {}
     previous = history.get(entry['name'], {}).get('builds', [])
     builds = []
@@ -136,15 +139,23 @@ def main():
     parser.add_argument('extension', nargs='?')
     parser.add_argument('--all', action='store_true', help='Refresh every catalog extension sequentially')
     parser.add_argument('--full-refresh', action='store_true', help='Refetch all historical manifests and exact image links')
+    parser.add_argument('--catalog', type=Path, default=ROOT / 'data/generated.json')
+    parser.add_argument('--history-file', type=Path, help='Private incremental cache destination')
     args = parser.parse_args()
     if bool(args.extension) == args.all:
         parser.error('Specify an extension or --all')
-    data = json.loads((ROOT / 'data/generated.json').read_text())
+    data = json.loads(args.catalog.read_text())
     entries = data['extensions'] if args.all else [e for e in data['extensions'] if e['name'] == args.extension]
     if not entries:
         parser.error('Extension not found in catalog')
     for entry in entries:
-        refresh_entry(entry, args.full_refresh)
+        if args.history_file:
+            refresh_entry(entry, args.full_refresh, args.history_file)
+        else:
+            refresh_entry(entry, args.full_refresh)
+
+    if args.all:
+        mark_complete(args.history_file or ROOT / '.cache/version-history/history.json', args.catalog)
 
 
 if __name__ == '__main__':

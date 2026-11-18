@@ -96,7 +96,7 @@ class HistoryTests(unittest.TestCase):
             root=Path(directory)
             (root/'data').mkdir()
             (root/'data/generated.json').write_text(json.dumps({'extensions':entries}))
-            with patch.object(history,'ROOT',root), patch.object(sys,'argv',['preview-versions.py','--all','--full-refresh']), patch.object(history,'refresh_entry') as refresh:
+            with patch.object(history,'ROOT',root), patch.object(sys,'argv',['preview-versions.py','--all','--full-refresh']), patch.object(history,'refresh_entry') as refresh, patch.object(history,'mark_complete'):
                 history.main()
             self.assertEqual(refresh.call_args_list,[call(entries[0],True),call(entries[1],True)])
 
@@ -107,7 +107,8 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
             (root/'data').mkdir()
-            path=root/'data/version_history.json'
+            path=root/'.cache/version-history/history.json'
+            path.parent.mkdir(parents=True)
             original=json.dumps({'one':{'builds':[],'fetchedAt':'previous'}})
             path.write_text(original)
             entry={'name':'one','variants':[{'reference':'ghcr.io/org/image:tag@sha256:abc'}]}

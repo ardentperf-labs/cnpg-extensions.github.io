@@ -19,7 +19,7 @@ jobs:
       - uses: actions/cache/save@v4
         with:
           path: |
-            data/version_history.json
+            .cache/version-history/history.json
             .cache/image-notices-v1
             .cache/cache-verification.json
           key: cache-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -36,7 +36,7 @@ jobs:
       - uses: actions/cache/restore@v4
         with:
           path: |
-            data/version_history.json
+            .cache/version-history/history.json
             .cache/image-notices-v1
             .cache/cache-verification.json
           key: cache-proof-${{ github.run_id }}-${{ github.run_attempt }}

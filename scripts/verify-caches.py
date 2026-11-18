@@ -19,7 +19,7 @@ if phase == 'populate':
     response = requests.get('https://raw.githubusercontent.com/cnpg-extensions/artifacts/main/image-catalogs-extensions/catalog-minimal-trixie.yaml', timeout=60)
     response.raise_for_status()
     catalog = yaml.safe_load(response.text)
-    item = next(e for image in catalog['spec']['images'] for e in image['extensions'] if e['name'] == 'semver')
+    item = next(e for image in catalog['spec']['images'] for e in image.get('extensions', []) if e['name'] == 'semver')
     reference = item['image']['reference']
     entry = {'name': 'semver', 'variants': [{'reference': reference}]}
     (ROOT / 'data').mkdir(exist_ok=True)
@@ -34,7 +34,7 @@ if phase == 'populate':
     print('COLD CACHE: fetched real semver history and extracted real image notices.', flush=True)
 elif phase == 'restore':
     saved = json.loads(fixture.read_text())
-    before = json.loads((ROOT / 'data/version_history.json').read_text())['semver']['builds']
+    before = json.loads((ROOT / '.cache/version-history/history.json').read_text())['semver']['builds']
     with patch.object(history, 'read_build', side_effect=AssertionError('Unexpected manifest fetch')) as manifests, patch.object(history, 'add_image_links', side_effect=AssertionError('Unexpected GitHub HTML fetch')) as links:
         history.refresh_entry(saved['entry'])
         manifests.assert_not_called()
@@ -44,7 +44,7 @@ elif phase == 'restore':
         assert notice == saved['notices']
         run.assert_not_called()
         output.assert_not_called()
-    after = json.loads((ROOT / 'data/version_history.json').read_text())['semver']['builds']
+    after = json.loads((ROOT / '.cache/version-history/history.json').read_text())['semver']['builds']
     assert before == after, 'Unchanged history must preserve all records'
     print(f'WARM CACHE VERIFIED: {len(after)} history records; zero manifest fetches, zero GitHub page fetches, zero Docker commands.', flush=True)
 else:

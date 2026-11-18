@@ -28,30 +28,46 @@ not run), or reuse the existing generated data and run just Hugo. Omitting
 sources and scans. Do not commit generated data or reports; reproduce them at build
 time. Full reports are available as downloads in the published site.
 
-The local Hugo server also exposes a Versions tab design preview. To populate an
-extension with its timestamp-tagged GHCR history, run:
+The local Hugo server also exposes a Versions tab design preview. To collect and
+publish a complete local snapshot from the generated catalog:
 
 ```sh
-.venv/bin/python scripts/preview-versions.py semver
+.venv/bin/python scripts/preview-versions.py --all
+.venv/bin/python scripts/version_history_snapshot.py publish .cache/version-history/history.json data/generated.json .cache/history-release/version-history.json
+.venv/bin/python scripts/version_history_snapshot.py install .cache/history-release/version-history.json
 ```
 
-This fetches published image metadata, excludes signature/attestation tags and
-mutable aliases, and writes ignored `data/version_history.json`. Re-run to refresh;
-errors preserve the previous history. Normal refreshes list tags, reuse saved manifest
-metadata and verified GitHub links, and fetch only new records or records whose
-catalog digest changed. Removed tags disappear from the next successful refresh.
-Timestamped historical tags are treated as append-only; use `--full-refresh` to
-recheck all tag mappings and links (including any historical retagging). Keep
-`data/version_history.json` between runs to retain the cache. Other extensions show their current catalog
-images until explicitly fetched locally. Actions runs `scripts/preview-versions.py --all`
-after catalog generation and restores/saves `data/version_history.json` across runs.
-Extensions refresh sequentially; each successful refresh is saved atomically. If a
-later extension fails, completed work is still cached, while the failed extension's
-previous record is retained and the build stops. A cold or evicted cache requires
-initial history collection. Manual runs can enable **Refetch all version-history
-metadata and image links** to bypass restoration. Bump the workflow's `versions-v1`
-cache namespace if the persisted format becomes incompatible.
-The Versions tab itself remains excluded from production builds.
+The collector writes only the private `.cache/version-history/history.json` cache;
+it never writes Hugo data. You can refresh one extension with
+`scripts/preview-versions.py semver`, but publication requires every catalog entry.
+Normal refreshes list tags, reuse saved manifest metadata and verified GitHub links,
+and fetch only new records or records whose catalog digest changed. Removed tags
+disappear from the next successful refresh. Timestamped historical tags are treated
+as append-only; use `--full-refresh` to recheck historical retagging and links.
+Failed collection leaves Hugo's previously installed data untouched. The explicit
+publish and install steps validate and atomically install a complete snapshot.
+Publication requires the completion receipt written by a successful `--all` run;
+its hashes must match both the candidate history and the input catalog.
+
+History collection is independent of site builds. The **Refresh versions history**
+workflow runs daily at 09:30 UTC or manually. It incrementally updates the private
+`.cache/version-history/history.json` cache. Successful extensions remain cached
+if a later extension fails, but no public snapshot is uploaded unless the full
+refresh and validation succeed. Enable **Refetch all version-history metadata and
+image links** on that workflow to bypass its cache. Bump `history-progress-v1` when
+making incompatible cache-format changes.
+
+Site builds never restore this private cache or run history collection. They import
+the newest retained `versions-history-snapshot` artifact from a completed,
+successful history-workflow run on `main`. Failed, cancelled, and in-progress runs
+are ineligible, even if they uploaded an artifact. Snapshot schema and contents
+are validated before atomically replacing Hugo's `data/version_history.json`.
+Malformed snapshots stop the site build, preserving the deployed site. If no
+successful snapshot exists yet (or all have expired), the site builds with current
+catalog data only. The Versions tab appears in production once a snapshot exists.
+Artifacts are retained for 90 days; collection failures leave the last successful
+snapshot available for subsequent site builds. No site build is triggered by history
+collection; the next ordinary site build picks up the snapshot.
 
 ## Sources of truth
 

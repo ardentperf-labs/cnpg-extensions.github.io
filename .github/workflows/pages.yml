@@ -4,10 +4,6 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      rebuild_history:
-        description: Refetch all version-history metadata and image links
-        type: boolean
-        default: false
       rebuild_notices:
         description: Re-extract license notices from every current image
         type: boolean
@@ -16,6 +12,7 @@ on:
     - cron: '30 10 * * *'
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: website-${{ github.ref }}
   cancel-in-progress: false
@@ -46,13 +43,6 @@ jobs:
           path: .cache/image-notices-v1
           key: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-
-      - name: Restore versions history
-        if: ${{ !inputs.rebuild_history }}
-        uses: actions/cache/restore@v4
-        with:
-          path: data/version_history.json
-          key: versions-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: versions-v1-${{ runner.os }}-
       - name: Test metadata processing
         run: python -m unittest discover -s tests -v
       - name: Refresh catalog, READMEs, SBOMs, container notices, and advisory matches
@@ -62,15 +52,10 @@ jobs:
         with:
           path: .cache/image-notices-v1
           key: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Refresh versions history incrementally
-        id: versions
-        run: python scripts/preview-versions.py --all
-      - name: Save versions history
-        if: ${{ always() && steps.versions.outcome != 'skipped' && hashFiles('data/version_history.json') != '' }}
-        uses: actions/cache/save@v4
-        with:
-          path: data/version_history.json
-          key: versions-v1-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Import latest successful versions snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/version_history_snapshot.py import
       - name: Build Hugo
         run: hugo --minify --baseURL 'https://cnpg-extensions.github.io/'
       - name: Validate generated output
