@@ -11,3 +11,6 @@ static/reports/
 static/catalog.json
 
 content/getting-started.md
+
+data/version_history.json
+data/version_history.tmp
