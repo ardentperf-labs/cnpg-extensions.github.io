@@ -170,3 +170,30 @@ To force extraction for all current images, manually run the website workflow wi
 **Re-extract license notices from every current image** enabled. This bypasses the
 notice-cache restore and saves fresh results for subsequent builds. Locally, remove
 `.cache/image-notices-v1` before generation. Advisory scans still refresh normally.
+
+## Weekly upstream Scorecard reports
+
+`scorecards.yml` runs every Monday at 08:17 UTC and supports manual dispatch.
+Both triggers run fresh Scorecard v5.6.0 scans, using the current published
+catalog and reviewed upstream mappings in `data/scorecard-repositories.json`.
+New unmapped extensions are explicitly unavailable until their mapping is reviewed.
+The scanner never builds upstream code. See the user-runnable command on the
+Security page before changing the automated command.
+
+Each run uploads `scorecard-results` with **21-day retention**. It contains an
+`index.json` with catalog revision, producer, run, scope and per-extension status,
+plus unmodified JSON reports keyed by repository URL hash. Scores are not adjusted.
+There is no release asset or automatic deletion of previous runs. Failed checks
+remain in the raw report; repository failures and unsupported hosts are explicit
+in the index. A run with no reports fails but uploads its diagnostic index.
+
+For testing, dispatch with `extensions=pgvector,http`; these artifacts are named
+`scorecard-results-test`, so a website consumer cannot mistake a subset for a full
+snapshot. Consumers should select the latest successful default-branch run's
+non-expired `scorecard-results` artifact and retain original report dates.
+This workflow produces artifacts only; website consumption/rendering is separate.
+
+The built-in GitHub token is used by default. Optional `SCORECARD_TOKEN` can supply
+additional API capacity; `SCORECARD_GITLAB_TOKEN` enables GitLab.com scans. Without
+it GitLab entries are unavailable. Salsa is explicitly unsupported by this workflow.
+Concurrency is limited to two scans, with a five-minute timeout per repository.
