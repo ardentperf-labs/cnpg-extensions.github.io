@@ -22,72 +22,117 @@ concurrency:
   cancel-in-progress: false
   queue: max
 jobs:
-  build:
+  inspect:
+    name: Scan image shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/prepare-website
+        with:
+          rebuild-cache: ${{ inputs.rebuild_cache }}
+      - name: Inspect and scan current images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REBUILD_CACHE: ${{ inputs.rebuild_cache }}
+          REFRESH_EXTENSION: ${{ inputs.refresh_extension }}
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: |
+          args=(--refresh --scan --workers 4 --evidence-only --shard-index "$SHARD_INDEX" --shard-count 4)
+          if [[ "$REBUILD_CACHE" == "true" ]]; then args+=(--rebuild-cache); fi
+          if [[ -n "$REFRESH_EXTENSION" ]]; then args+=(--refresh-extension "$REFRESH_EXTENSION"); fi
+          python scripts/generate.py "${args[@]}"
+      - name: Save fresh evidence and retrieved assets
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-evidence-${{ matrix.shard }}
+          overwrite: true
+          path: |
+            .cache/inspected-shard-*.json
+            .cache/oci
+            .cache/image-notices-v1
+            static/reports
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
+  history:
+    name: Refresh version history
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
-      - uses: actions/setup-python@v5
+      - uses: ./.github/actions/prepare-website
         with:
-          python-version: '3.12'
-          cache: pip
-      - run: pip install -r requirements.txt
-      - run: python scripts/install-tools.py
-      - run: echo "$PWD/.tools" >> "$GITHUB_PATH"
-      - name: Find saved website assets
-        id: assets
-        if: ${{ !inputs.rebuild_cache }}
-        continue-on-error: true
-        uses: actions/github-script@v7
+          rebuild-cache: ${{ inputs.rebuild_cache }}
+      - name: Retrieve current version history
         env:
-          ASSET_NAME: website-assets-v1-${{ hashFiles('scripts/image_notices.py') }}
-        with:
-          script: |
-            const {owner, repo} = context.repo;
-            const cutoff = Date.now() - 7 * 24 * 60 * 60 * 1000;
-            const branch = context.ref.replace('refs/heads/', '');
-            for await (const {data: runs} of github.paginate.iterator(github.rest.actions.listWorkflowRuns, {
-              owner, repo, workflow_id: 'pages.yml', branch, status: 'completed', per_page: 100
-            })) {
-              for (const run of runs) {
-                if (Date.parse(run.created_at) < cutoff) return;
-                const {data} = await github.rest.actions.listWorkflowRunArtifacts({owner, repo, run_id: run.id});
-                if (data.artifacts.some(a => a.name === process.env.ASSET_NAME && !a.expired)) {
-                  core.setOutput('run_id', run.id);
-                  return;
-                }
-              }
-            }
-            core.info('No saved assets; the generator will retrieve them.');
-      - name: Restore saved website assets
-        if: ${{ steps.assets.outputs.run_id != '' }}
-        continue-on-error: true
-        uses: actions/download-artifact@v4
-        with:
-          name: website-assets-v1-${{ hashFiles('scripts/image_notices.py') }}
-          path: .cache
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.assets.outputs.run_id }}
-      - name: Test metadata processing
-        run: python -m unittest discover -s tests -v
-      - name: Generate website data and retrieve missing assets
-        id: generate
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REBUILD_CACHE: ${{ inputs.rebuild_cache }}
           REFRESH_EXTENSION: ${{ inputs.refresh_extension }}
         run: |
-          args=(--refresh --scan --workers 4)
-          if [[ "$REBUILD_CACHE" == "true" ]]; then args+=(--rebuild-cache); fi
+          args=()
+          if [[ -n "$REFRESH_EXTENSION" ]]; then args+=(--refresh-extension "$REFRESH_EXTENSION"); fi
+          python scripts/history_evidence.py "${args[@]}"
+      - name: Save history and retrieved assets
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-evidence-history
+          overwrite: true
+          path: |
+            .cache/version-history
+            .cache/history-commits.json
+            data/version_history.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
+  build:
+    needs: [inspect, history]
+    if: ${{ always() && !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/prepare-website
+        with:
+          rebuild-cache: ${{ inputs.rebuild_cache }}
+      - name: Collect fresh evidence and retrieved assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: website-evidence-*
+          merge-multiple: true
+      - name: Require successful scans and history
+        env:
+          INSPECT_RESULT: ${{ needs.inspect.result }}
+          HISTORY_RESULT: ${{ needs.history.result }}
+        run: |
+          test "$INSPECT_RESULT" = success
+          test "$HISTORY_RESULT" = success
+      - name: Test metadata processing
+        run: python -m unittest discover -s tests -v
+      - name: Assemble fresh evidence and website data
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REFRESH_EXTENSION: ${{ inputs.refresh_extension }}
+        run: |
+          args=(--refresh --merge-evidence --merge-history)
           if [[ -n "$REFRESH_EXTENSION" ]]; then args+=(--refresh-extension "$REFRESH_EXTENSION"); fi
           python scripts/generate.py "${args[@]}"
       - name: Save website assets for the next build
-        if: ${{ always() && (steps.generate.outcome == 'success' || steps.generate.outcome == 'failure') }}
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: website-assets-v1-${{ hashFiles('scripts/image_notices.py') }}
+          overwrite: true
           path: |
             .cache/oci
             .cache/image-notices-v1

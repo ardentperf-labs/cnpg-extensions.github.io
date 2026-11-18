@@ -31,6 +31,7 @@ time. Full reports are available as downloads in the published site.
 The website generator retrieves assets directly and saves them for reuse. The nightly
 website workflow restores the previous `website-assets-v1-*` artifact, runs the
 generator, and uploads the resulting assets again with **seven-day retention**.
+New working branches can also restore compatible assets from the default branch.
 There is no separate history workflow or snapshot publication step.
 
 Saved assets include digest-addressed OCI metadata/SBOMs, extracted license notices,
@@ -45,8 +46,11 @@ to discover older additions and remove deleted tags. Incremental runs retain old
 cached records, so deletions can remain visible until reconciliation. Explicit full
 refreshes also refetch known manifests. Timestamped tags are otherwise treated as
 immutable. GitHub page ordering is an observed website behavior, not an OCI API
-contract; malformed pages and failed retrievals fail the build. History updates
-remain serial, preserving completed extensions without concurrent cache writes.
+contract; malformed pages and failed retrievals fail the build. History updates use four concurrent retrieval workers and a single cache-writing
+coordinator. Each extension has its own cache file, avoiding repeated parsing and
+rewriting of the entire catalog history as the number of images grows. Legacy
+aggregate caches are migrated automatically; completed extensions remain saved
+when another retrieval fails.
 
 Advisory databases refresh and scans rerun each
 build so new advisories are detected for unchanged images. Source checkouts refresh
@@ -120,7 +124,10 @@ SBOM format; do not rewrite Debian package identities to accommodate a scanner.
 The generator currently updates Grype's database once, then runs the documented
 JSON SBOM scan for each platform with automatic database updates disabled so the
 batch uses the same database. OSV refreshes the Cargo and Debian database archives
-once per build, then scans all SBOMs with `--offline` against that fixed snapshot.
+once per build, then scans all SBOMs together with `--offline` against that fixed snapshot, loading
+each advisory database once per batch instead of once per platform. Results are
+attributed by the scanner's source path; each platform retains its own findings and
+downloadable report.
 Refresh failures produce unavailable OSV results; stale databases are not silently reused.
 Database hashes and refresh time are recorded with each scan in generated data.
 OSV-Scanner runs the documented JSON command as a temporary
@@ -146,8 +153,63 @@ repository owner configures protection rules.
 
 Fatal catalog/README parsing failures stop the build and preserve the previous
 site. Individual registry/SBOM/scan failures appear as unavailable, not zero CVEs.
-Grype DB update failures likewise produce unavailable results. Immutable registry
-blobs are cached across builds; advisory scans are rerun rather than cached.
+The distributed workflow requires verified matching advisory snapshots; a database
+refresh failure stops the build. Local whole-catalog generation marks those scans
+unavailable. Immutable registry blobs are cached across builds; advisory scans are
+rerun rather than cached.
+
+## Build performance
+
+The website workflow distributes current catalog images across four scan jobs.
+Version history refreshes in a parallel job, since it does not depend on scans.
+Each scan job runs the pinned, unmodified Grype once per platform and batches OSV
+inputs in groups of at most 512 unchanged SBOMs. Advisory databases are refreshed
+on every run. The assembly job accepts only a complete set of fresh evidence from
+that workflow run, with exact catalog coverage, matching source commits and matching
+advisory database identities. Missing shards, mismatched snapshots, or missing
+reports stop the build. If upstream commits or advisory archives change during a
+run, rerun the entire workflow so every shard uses the new snapshot; retrying just
+failed jobs can retain mismatched evidence from successful jobs. Existing scan timestamps and per-platform reports are preserved.
+
+Grype 0.121.3 hashes its multi-gigabyte database twice per invocation. Its
+`GRYPE_DB_VALIDATE_BY_HASH_ON_START=false` option still computes those hashes but
+suppresses integrity errors, so the website keeps integrity validation enabled.
+The separate runners distribute this cost without changing vulnerability matching.
+More current images require proportionally more scan work; increase both the workflow
+matrix and `--shard-count` together when more runner capacity is needed. This uses
+more concurrent runners and some extra setup/download time in exchange for lower
+wall time. First builds and full cache rebuilds still retrieve all immutable assets.
+
+Each completed scan job uploads its evidence and retrieved assets for one day. The
+assembly job consolidates reusable assets into the existing seven-day artifact,
+including on failed builds where partial assets are available. Advisory scan results
+are never reused from an earlier workflow run. History retrieval uses four concurrent
+workers and per-extension files; HTML validation parses each page once.
+
+Generator logs include `PROFILE phase` wall times and cumulative per-function times.
+Cumulative times overlap across workers and must not be added to calculate wall time.
+Local `python scripts/generate.py --refresh --scan` still runs the whole catalog in
+one process; the workflow distributes that same work across runners.
+
+Measured on November 18, 2026 with warmed assets, 103 extensions, 204 current
+catalog images, and 408 platform SBOMs. These are whole-workflow elapsed times
+from creation through completion, including setup and artifact transfers:
+
+| Version | Elapsed | Run |
+| --- | --- | --- |
+| Upstream main with timing instrumentation | 21m15s | [Baseline](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44264693999) |
+| Optimized build | 3m51s | [First verification](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44268457014) |
+| Same code, restoring the new workflow's cache | 3m50s | [Repeat verification](https://github.com/ardentperf-labs/cnpg-extensions.github.io/actions/runs/44269092794) |
+
+The baseline spent 19m07s generating data, including 3m54s in serial history
+retrieval, and 78s validating HTML. The optimized scan jobs spent 42–68s refreshing
+advisories, 53–66s inspecting images and running Grype, and 7–11s running OSV;
+these jobs overlap. History finished alongside scans. Final assembly, Hugo,
+validation and uploads took about 50s including its job setup, with HTML validation
+around 9s. Both final runs retained 408 Grype results, 374 OSV results and 34 explicit
+OSV unavailable results (30 SBOMs without package URLs and four requiring an
+unavailable ecosystem database). Cold/full-cache rebuilds are not covered by this
+under-five-minute measurement.
 
 ## Validation
 

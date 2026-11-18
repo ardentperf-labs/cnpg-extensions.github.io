@@ -2,11 +2,12 @@
 """Retrieve and reuse timestamp-tagged GHCR assets for website generation."""
 import argparse
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import hashlib
 import json
 import re
+from tempfile import NamedTemporaryFile
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -15,20 +16,58 @@ from urllib.parse import urljoin, urlsplit
 from generate import ROOT, Registry, check_digest, image_package_url
 
 BUILD_TAG = re.compile(r'^.+-\d{12}-\d+-(?:bookworm|trixie)$')
+EXTENSION_NAME = re.compile(r'[a-z0-9][a-z0-9_-]*')
+HISTORY_WORKERS = 4
 
 
 def atomic_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value))
-    temporary.replace(path)
+    stream = NamedTemporaryFile(mode='w', dir=path.parent, delete=False)
+    temporary = Path(stream.name)
+    try:
+        with stream:
+            stream.write(json.dumps(value))
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+class HistoryCache:
+    def __init__(self, history_path=None):
+        default_path = ROOT / '.cache/version-history/history.json'
+        self.path = Path(history_path) if history_path else default_path
+        self.per_extension = self.path.resolve() == default_path.resolve()
+        if self.per_extension:
+            self.path = default_path
+        self.aggregate = None
+
+    def entry_path(self, name):
+        if not EXTENSION_NAME.fullmatch(name):
+            raise ValueError('Invalid extension name')
+        return self.path.parent / 'entries' / f'{name}.json'
+
+    def load(self, name):
+        if self.per_extension:
+            path = self.entry_path(name)
+            if path.exists():
+                return json.loads(path.read_text())
+        if self.aggregate is None:
+            self.aggregate = json.loads(self.path.read_text()) if self.path.exists() else {}
+        return self.aggregate.get(name, {})
+
+    def save(self, name, record):
+        if self.per_extension:
+            atomic_json(self.entry_path(name), record)
+        else:
+            self.aggregate[name] = record
+            atomic_json(self.path, self.aggregate)
 
 
 def validate(histories):
     if not isinstance(histories, dict) or not histories:
         raise ValueError('Empty or invalid history data')
     for name, entry in histories.items():
-        if not re.fullmatch(r'[a-z0-9][a-z0-9_-]*', name):
+        if not EXTENSION_NAME.fullmatch(name):
             raise ValueError('Invalid extension name')
         datetime.fromisoformat(entry['fetchedAt'])
         if not isinstance(entry['builds'], list):
@@ -165,7 +204,14 @@ def recent_builds(repository, cached):
     return found
 
 
-def refresh_recent_repository(registry, cached, current_digests):
+def read_builds(registry, tags, workers):
+    if workers == 1 or len(tags) < 2:
+        return [read_build(registry, tag) for tag in tags]
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda tag: read_build(registry, tag), tags))
+
+
+def refresh_recent_repository(registry, cached, current_digests, manifest_workers=HISTORY_WORKERS):
     discovered = recent_builds(registry.repo, cached)
     results = dict(cached)
     pending = set(discovered) | set(current_digests)
@@ -173,8 +219,7 @@ def refresh_recent_repository(registry, cached, current_digests):
                if tag not in cached or not cached[tag].get('imageURL')
                or cached[tag]['reference'].split('@')[1] != current_digests.get(
                    tag, discovered.get(tag, {}).get('digest'))]
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        fetched = list(pool.map(lambda tag: read_build(registry, tag), missing))
+    fetched = read_builds(registry, missing, manifest_workers)
     unresolved = []
     for build in fetched:
         item = discovered.get(build['tag'])
@@ -189,12 +234,13 @@ def refresh_recent_repository(registry, cached, current_digests):
     return list(results.values())
 
 
-def refresh_repository(registry, previous, current_digests=None, full_refresh=False, incremental=False):
+def refresh_repository(registry, previous, current_digests=None, full_refresh=False,
+                       incremental=False, manifest_workers=HISTORY_WORKERS):
     current_digests = current_digests or {}
     cached = {b['tag']: b for b in previous
               if b['reference'].split('@')[0].rsplit(':', 1)[0] == 'ghcr.io/' + registry.repo}
     if incremental and cached and not full_refresh:
-        return refresh_recent_repository(registry, cached, current_digests)
+        return refresh_recent_repository(registry, cached, current_digests, manifest_workers)
     tags = build_tags(registry)
     reused = []
     missing = []
@@ -206,8 +252,7 @@ def refresh_repository(registry, previous, current_digests=None, full_refresh=Fa
             reused.append(dict(build))
         else:
             missing.append(tag)
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        fetched = list(pool.map(lambda tag: read_build(registry, tag), missing))
+    fetched = read_builds(registry, missing, manifest_workers)
     builds = reused + fetched
     # Only unresolved/new images require GitHub HTML pagination.
     unresolved = [b for b in builds if not b.get('imageURL')]
@@ -217,12 +262,8 @@ def refresh_repository(registry, previous, current_digests=None, full_refresh=Fa
     return builds
 
 
-def refresh_entry(entry, full_refresh=False, history_path=None):
+def fetch_entry(entry, saved, full_refresh=False, manifest_workers=HISTORY_WORKERS):
     repositories = {v['reference'].split('@')[0].split(':')[0] for v in entry['variants']}
-    path = Path(history_path) if history_path else ROOT / '.cache/version-history/history.json'
-    path.parent.mkdir(parents=True, exist_ok=True)
-    history = json.loads(path.read_text()) if path.exists() else {}
-    saved = history.get(entry['name'], {})
     previous = saved.get('builds', [])
     now = datetime.now(timezone.utc)
     reconciled = saved.get('reconciledAt') or saved.get('fetchedAt')
@@ -233,40 +274,69 @@ def refresh_entry(entry, full_refresh=False, history_path=None):
         registry = Registry(repository + '@sha256:unused')
         current = {v['reference'].split('@')[0].rsplit(':', 1)[1]: v['reference'].split('@')[1]
                    for v in entry['variants'] if v['reference'].startswith(repository + ':')}
-        builds.extend(refresh_repository(registry, previous, current, full_refresh, incremental=incremental))
+        with registry.session:
+            builds.extend(refresh_repository(registry, previous, current, full_refresh,
+                                             incremental=incremental, manifest_workers=manifest_workers))
     # Mutable aliases and attestation tags are excluded; deduplicate image digests.
     builds = list({b['reference'].split('@')[1]: b for b in builds}.values())
     builds.sort(key=lambda b: b['annotations'].get('org.opencontainers.image.created', ''), reverse=True)
     record = {'fetchedAt': now.isoformat(),
               'reconciledAt': reconciled if incremental else now.isoformat(), 'builds': builds}
     validate({entry['name']: record})
-    history[entry['name']] = record
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(history))
-    temporary.replace(path)
     print(f"{entry['name']}: {len(builds)} images", flush=True)
+    return record
 
 
-def install_history(entries, cache, destination):
-    saved = json.loads(cache.read_text())
-    complete = {entry['name']: saved[entry['name']] for entry in entries}
+def refresh_entry(entry, full_refresh=False, history_path=None):
+    cache = HistoryCache(history_path)
+    name = entry['name']
+    record = fetch_entry(entry, cache.load(name), full_refresh=full_refresh)
+    cache.save(name, record)
+
+
+def install_history(entries, records, destination):
+    complete = {entry['name']: records[entry['name']] for entry in entries}
     validate(complete)
     atomic_json(destination, complete)
 
 
-def generate_history(entries, refresh_extension=None):
-    cache = ROOT / '.cache/version-history/history.json'
+def generate_history(entries, refresh_extension=None, *, full_refresh=False, history_path=None):
+    cache = HistoryCache(history_path)
+    saved = {entry['name']: cache.load(entry['name']) for entry in entries}
+    records = {}
+    failure = None
     # Each completed extension is saved immediately. Hugo data changes only once
     # all required retrievals succeed; a failure stops the website build.
-    for entry in entries:
-        refresh_entry(entry, full_refresh=entry['name'] == refresh_extension)
-    install_history(entries, cache, ROOT / 'data/version_history.json')
+    with ThreadPoolExecutor(max_workers=HISTORY_WORKERS) as pool:
+        pending = {
+            pool.submit(fetch_entry, entry, saved[entry['name']],
+                        full_refresh=full_refresh or entry['name'] == refresh_extension,
+                        manifest_workers=1): entry['name']
+            for entry in entries
+        }
+        for future in as_completed(pending):
+            if future.cancelled():
+                continue
+            name = pending[future]
+            try:
+                record = future.result()
+                cache.save(name, record)
+                records[name] = record
+            except Exception as error:
+                if failure is None:
+                    error.add_note(f'Refreshing version history for {name}')
+                    failure = error
+                    for queued in pending:
+                        queued.cancel()
+    if failure is not None:
+        raise failure
+    install_history(entries, records, ROOT / 'data/version_history.json')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('extension', nargs='?')
-    parser.add_argument('--all', action='store_true', help='Refresh every catalog extension sequentially')
+    parser.add_argument('--all', action='store_true', help='Refresh every catalog extension')
     parser.add_argument('--full-refresh', action='store_true', help='Refetch all historical manifests and exact image links')
     parser.add_argument('--catalog', type=Path, default=ROOT / 'data/generated.json')
     parser.add_argument('--history-file', type=Path, help='Private incremental cache destination')
@@ -277,14 +347,10 @@ def main():
     entries = data['extensions'] if args.all else [e for e in data['extensions'] if e['name'] == args.extension]
     if not entries:
         parser.error('Extension not found in catalog')
-    for entry in entries:
-        if args.history_file:
-            refresh_entry(entry, args.full_refresh, args.history_file)
-        else:
-            refresh_entry(entry, args.full_refresh)
-
     if args.all:
-        install_history(entries, args.history_file or ROOT / '.cache/version-history/history.json', ROOT / 'data/version_history.json')
+        generate_history(entries, full_refresh=args.full_refresh, history_path=args.history_file)
+    else:
+        refresh_entry(entries[0], args.full_refresh, args.history_file)
 
 
 if __name__ == '__main__':

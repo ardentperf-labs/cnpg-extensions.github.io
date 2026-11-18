@@ -4,8 +4,11 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 """
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
+from collections import Counter
+from build_timing import timed, phase
+from evidence_shards import database_identity, merge_shards, shard_path
 from image_notices import container_notices
-from osv_scan import scan_osv, refresh_database
+from osv_scan import scan_osv_batch, refresh_database
 from guide_layout import getting_started
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, parse_qs, unquote, quote
@@ -31,6 +34,7 @@ def source_refresh_time(refreshed, commits, previous, now):
         return previous.get('refreshedAt')
     return None
 
+@timed("checkout")
 def checkout(name, refresh):
     path = CACHE/name
     if not (path/'.git').exists():
@@ -124,6 +128,7 @@ class Registry:
         r=self.session.get('https://ghcr.io/token',params={'service':'ghcr.io','scope':f'repository:{self.repo}:pull'},timeout=60)
         r.raise_for_status()
         self.session.headers.update({'Authorization':'Bearer '+r.json()['token'], 'Accept':'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'})
+    @timed("registry asset")
     def get(self,digest,kind='manifests'):
         dest=CACHE/'oci'/digest.replace(':','-')
         if dest.exists() and not self.refresh: data=dest.read_bytes()
@@ -134,6 +139,7 @@ class Registry:
         check_digest(data,digest)
         return json.loads(data)
 
+@timed("scan")
 def scan(sbom, grype, database):
     if not grype: return {'status':'not-run','reason':'Vulnerability scanning was not requested.'}
     if database.get('error'): return {'status':'unavailable','reason':database['error']}
@@ -152,7 +158,8 @@ def scan(sbom, grype, database):
             'findings':sorted(findings.values(),key=lambda v:(v['severity'],v['id'],v['package'])),
             'report':str(dest.relative_to(ROOT/'static'))}
 
-def inspect_image(item, grype, database, osv_database=None, refresh=False):
+@timed("inspect_image")
+def inspect_image(item, grype, database, refresh=False):
     result={**item,'platforms':[]}
     try:
         reg=Registry(item['reference'], refresh=refresh);index=reg.get(reg.digest)
@@ -181,7 +188,6 @@ def inspect_image(item, grype, database, osv_database=None, refresh=False):
                 record.update(status='available',packages=packages(spdx),licenses=spdx.get('hasExtractedLicensingInfos',[]),sbom=str(dest.relative_to(ROOT/'static')))
                 try: record['scan']=scan(dest,grype,database)
                 except Exception as ex: record['scan']={'status':'unavailable','reason':str(ex)}
-                record['osvScan']=scan_osv(dest,ROOT,shutil.which('osv-scanner') if grype else None,osv_database)
             except Exception as ex: record['reason']=str(ex)
             result['platforms'].append(record)
         result['status']='available'
@@ -189,6 +195,7 @@ def inspect_image(item, grype, database, osv_database=None, refresh=False):
     except Exception as ex: result.update(status='unavailable',reason=str(ex),version='Unavailable')
     return result
 
+@timed("readme_html")
 def readme_html(text, repo, commit, path, routes, depth=2):
     html=markdown.markdown(text,extensions=['fenced_code','tables','toc'])
     soup=BeautifulSoup(html,'html.parser')
@@ -233,37 +240,47 @@ def readme_html(text, repo, commit, path, routes, depth=2):
     return bleach.clean(str(soup),tags=tags,attributes={'*':['id','class'],'a':['href','title','target','rel'],'img':['src','alt','width','height'],'details':['open'],'span':['class','aria-hidden']},protocols=['http','https','mailto'],strip=True)
 
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--refresh',action='store_true');parser.add_argument('--scan',action='store_true');parser.add_argument('--workers',type=int,default=4);parser.add_argument('--reuse-evidence',action='store_true',help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
+    parser=argparse.ArgumentParser();parser.add_argument('--refresh',action='store_true');parser.add_argument('--scan',action='store_true');parser.add_argument('--workers',type=int,default=4)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--reuse-evidence', action='store_true', help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
+    mode.add_argument('--evidence-only', action='store_true', help='Scan one catalog partition and save its evidence and notices')
+    mode.add_argument('--merge-evidence', action='store_true', help='Validate and assemble scanned catalog partitions')
+    parser.add_argument('--merge-history', action='store_true', help='Use verified history retrieved in this workflow run')
+    parser.add_argument('--shard-index', type=int, help='Zero-based index of the partition to scan')
+    parser.add_argument('--shard-count', type=int, help='Total number of catalog partitions')
     parser.add_argument('--rebuild-cache', action='store_true', help='Ignore saved OCI assets, license notices, and version history')
     parser.add_argument('--refresh-extension', help='Refetch saved assets for one catalog extension')
-    args=parser.parse_args();CACHE.mkdir(exist_ok=True)
+    args=parser.parse_args()
     if args.refresh_extension and args.reuse_evidence:
         parser.error('--refresh-extension cannot be combined with --reuse-evidence')
+    if args.evidence_only:
+        if not args.scan:
+            parser.error('--evidence-only requires --scan')
+        if args.shard_count is None or args.shard_index is None or not 0 <= args.shard_index < args.shard_count:
+            parser.error('--evidence-only requires a shard index between zero and shard count minus one')
+    elif args.shard_index is not None or args.shard_count is not None:
+        parser.error('--shard-index and --shard-count require --evidence-only')
+    if args.merge_history and not args.merge_evidence:
+        parser.error('--merge-history requires --merge-evidence')
+    if args.merge_evidence and args.scan:
+        parser.error('--merge-evidence already consumes scanned evidence')
+    if args.rebuild_cache and (args.reuse_evidence or args.merge_evidence):
+        parser.error('--rebuild-cache requires fresh evidence collection')
+
+    CACHE.mkdir(exist_ok=True)
+    if args.evidence_only:
+        output_shard = shard_path(CACHE, args.shard_index)
+        output_shard.unlink(missing_ok=True)
     if args.rebuild_cache:
-        if args.reuse_evidence:
-            parser.error('--rebuild-cache cannot be combined with --reuse-evidence')
         for name in ('oci', 'image-notices-v1', 'version-history'):
             shutil.rmtree(CACHE / name, ignore_errors=True)
-    commits={n:checkout(n,args.refresh) for n in REPOS}
-    refresh_record=CACHE/'source-refresh.json'
-    previous=json.loads(refresh_record.read_text()) if refresh_record.exists() else {}
-    source_refreshed_at=source_refresh_time(args.refresh, commits, previous, NOW)
-    if args.refresh:
-        refresh_record.write_text(json.dumps({'commits':commits,'refreshedAt':source_refreshed_at}))
-    recipes={};routes={}
-    for src in ['upstream','source']:
-        for path in (CACHE/src).rglob('metadata.hcl'):
-            if '.git' in path.parts:continue
-            try:
-                with path.open() as f: meta=hcl2.load(f,serialization_options=SerializationOptions(strip_string_quotes=True,with_comments=False)).get('metadata',{})
-            except Exception: continue
-            name=meta.get('name') or meta.get('image_name')
-            if not isinstance(name,str) or not (path.parent/'README.md').exists():continue
-            rel=(path.parent/'README.md').relative_to(CACHE/src).as_posix()
-            recipes[(REPOS[src],name)]={'meta':meta,'readme':path.parent/'README.md','repo':REPOS[src],'commit':commits[src],'path':rel,
-                'build':meta.get('build_system') or ('PGRX' if rel.startswith('pgrx/') else 'Universe' if rel.startswith('universe/') else 'Debian')}
-            routes[(REPOS[src],rel)]='extensions/'+name
-        routes[(REPOS[src],'README.md')]='get-started'
+    with phase("source refresh"):
+        commits={n:checkout(n,args.refresh) for n in REPOS}
+        refresh_record=CACHE/'source-refresh.json'
+        previous=json.loads(refresh_record.read_text()) if refresh_record.exists() else {}
+        source_refreshed_at=source_refresh_time(args.refresh, commits, previous, NOW)
+        if args.refresh:
+            refresh_record.write_text(json.dumps({'commits':commits,'refreshedAt':source_refreshed_at}))
     jobs=[]
     for cat in sorted((CACHE/'artifacts/image-catalogs-extensions').glob('catalog-*.yaml')):
         document=yaml.safe_load(cat.read_text());distro=document['metadata']['labels']['images.cnpg.io/os']
@@ -276,81 +293,132 @@ def main():
     if args.refresh_extension and args.refresh_extension not in {j['name'] for j in jobs}:
         parser.error('Unknown catalog extension: ' + args.refresh_extension)
     evidence_file=CACHE/'inspected.json'
-    if args.reuse_evidence:
+    if args.merge_evidence:
+        with phase("evidence assembly"):
+            images, database = merge_shards(CACHE, jobs, commits, ROOT / 'static')
+    elif args.reuse_evidence:
         saved=json.loads(evidence_file.read_text());images=saved['images'];database=saved['database']
         if sorted((x['name'],x['pg'],x['distro'],x['reference']) for x in images)!=sorted((x['name'],x['pg'],x['distro'],x['reference']) for x in jobs):
             raise RuntimeError('Cached evidence does not match current catalogs; regenerate it')
     else:
+        scan_jobs = jobs
+        if args.evidence_only:
+            if args.shard_count > len(jobs):
+                parser.error('--shard-count exceeds the number of catalog images')
+            scan_jobs = jobs[args.shard_index::args.shard_count]
         grype=shutil.which('grype') if args.scan else None
         if args.scan and (not grype or not shutil.which('osv-scanner')):raise RuntimeError('--scan requires Grype and OSV-Scanner')
-        database={}
-        if grype:
-            p=subprocess.run([grype,'db','update'],capture_output=True,text=True)
-            if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
-            else: database=json.loads(run(grype,'db','status','-o','json'))
-        osv_database=refresh_database(ROOT) if args.scan else None
+        with phase("advisory refresh"):
+            database={}
+            if grype:
+                p=subprocess.run([grype,'db','update'],capture_output=True,text=True)
+                if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
+                else: database=json.loads(run(grype,'db','status','-o','json'))
+            osv_database=timed("OSV database refresh")(refresh_database)(ROOT) if args.scan else None
+            if args.evidence_only:
+                database_identity(database, osv_database)
         images=[]
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures=[pool.submit(inspect_image,j,grype,database,osv_database,j['name']==args.refresh_extension) for j in jobs]
-            for f in concurrent.futures.as_completed(futures):
-                image=f.result();images.append(image)
-                print(f"{len(images)}/{len(jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
+        with phase("image inspection and Grype"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+                futures=[pool.submit(inspect_image,j,grype,database,j['name']==args.refresh_extension) for j in scan_jobs]
+                for f in concurrent.futures.as_completed(futures):
+                    image=f.result();images.append(image)
+                    print(f"{len(images)}/{len(scan_jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
+        platforms = [p for image in images for p in image['platforms'] if p['status'] == 'available']
+        with phase("OSV batch scan"):
+            osv_results = scan_osv_batch([ROOT / 'static' / p['sbom'] for p in platforms],
+                                        ROOT, shutil.which('osv-scanner') if args.scan else None, osv_database)
+        for platform in platforms:
+            platform['osvScan'] = osv_results[ROOT / 'static' / platform['sbom']]
+    if not (args.reuse_evidence or args.evidence_only):
         evidence_file.write_text(json.dumps({'images':images,'database':database}))
+    for scanner in ('scan', 'osvScan'):
+        counts = Counter(p.get(scanner, {}).get('status', 'missing') for image in images
+                         for p in image['platforms'] if p['status'] == 'available')
+        print(f'EVIDENCE {scanner}: {json.dumps(counts, sort_keys=True)}', flush=True)
     # Rebuild display fields from original SPDX, including during local evidence reuse.
-    for image in images:
-        image['packageURL'] = image_package_url(image['reference'])
-        for platform in image['platforms']:
-            if platform['status']=='available':
-                spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())
-                platform['packages']=packages(spdx)
-                platform['noticeFiles']=notice_files(spdx)
-    # Read shipped notices for every publisher, independently of SBOM availability.
-    with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-        pending=[]
+    if not args.evidence_only:
         for image in images:
+            image['packageURL'] = image_package_url(image['reference'])
             for platform in image['platforms']:
-                pending.append((platform, pool.submit(container_notices,
-                    image['reference'], platform['architecture'], platform['digest'], CACHE,
-                    refresh=image['name']==args.refresh_extension)))
-        for platform, future in pending:
-            platform['containerNotices']=future.result()
-    entries=[]
-    content=ROOT/'content/extensions';content.mkdir(parents=True,exist_ok=True)
-    for old in content.glob('*/index.md'): old.unlink()
-    for name in sorted({j['name'] for j in jobs}):
-        variants=sorted([i for i in images if i['name']==name],key=lambda i:(i['distro']!='trixie',-i['pg']))
-        publisher='cloudnative-pg' if '/cloudnative-pg/' in variants[0]['reference'] else 'cnpg-extensions'
-        repo=publisher+'/postgres-extensions-containers';recipe=recipes.get((repo,name))
-        if not recipe:
-            # Some upstream recipes use a different image_name. Match README directory from the catalog name.
-            source='upstream' if publisher=='cloudnative-pg' else 'source'
-            found=list((CACHE/source).rglob(name+'/README.md'))
-            if found: recipe={'meta':{},'readme':found[0],'repo':repo,'commit':commits[source],'path':found[0].relative_to(CACHE/source).as_posix(),'build':'Debian'}
-        if not recipe: raise RuntimeError('No source README found for published extension '+name)
-        text=recipe['readme'].read_text()
-        soup=BeautifulSoup(markdown.markdown(text),'html.parser');first=soup.find('p')
-        description=first.get_text(' ',strip=True) if first else name
-        entry={'name':name,'title':name,'sqlName':recipe['meta'].get('sql_name',''),'description':description,'publisher':publisher,'build':'PGRX' if recipe['build'].lower()=='pgrx' else recipe['build'].capitalize(),
-            'source':f"https://github.com/{repo}/blob/main/{recipe['path']}", 'variants':variants,
-            'version':variants[0]['version'],'distros':sorted({i['distro'] for i in variants}),'pgVersions':sorted({i['pg'] for i in variants}),
-            'declaredLicenses':recipe['meta'].get('licenses',[])}
-        entries.append(entry)
-        directory=content/name;directory.mkdir(exist_ok=True)
-        fm={'title':entry['title'],'description':description,'extension':name,'layout':'extension'}
-        body=readme_html(text,repo,recipe['commit'],recipe['path'],routes)
-        (directory/'index.md').unlink(missing_ok=True)
-        fm['type'] = 'extensions'
-        (directory/'_index.md').write_text('---\n'+yaml.safe_dump(fm,sort_keys=False)+'---\n'+body+'\n')
-        for view in ('overview', 'documentation', 'dependencies', 'licenses'):
-            tab_directory = directory/view
-            tab_directory.mkdir(exist_ok=True)
-            tab_fm = dict(fm, view=view)
+                if platform['status']=='available':
+                    spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())
+                    platform['packages']=packages(spdx)
+                    platform['noticeFiles']=notice_files(spdx)
+    # Read shipped notices for every publisher, independently of SBOM availability.
+    if not args.merge_evidence:
+        with phase("license notices"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+                pending=[]
+                for image in images:
+                    for platform in image['platforms']:
+                        pending.append((platform, pool.submit(timed("notices")(container_notices),
+                            image['reference'], platform['architecture'], platform['digest'], CACHE,
+                            refresh=image['name']==args.refresh_extension and not args.merge_evidence)))
+                for platform, future in pending:
+                    platform['containerNotices']=future.result()
+    if args.evidence_only:
+        output_shard.write_text(json.dumps({'shardIndex': args.shard_index, 'shardCount': args.shard_count,
+                                           'commits': commits, 'database': database,
+                                           'osvDatabase': osv_database, 'images': images}))
+        return
+
+    with phase("page content"):
+        recipes={};routes={}
+        for src in ['upstream','source']:
+            for path in (CACHE/src).rglob('metadata.hcl'):
+                if '.git' in path.parts:continue
+                try:
+                    with path.open() as f: meta=hcl2.load(f,serialization_options=SerializationOptions(strip_string_quotes=True,with_comments=False)).get('metadata',{})
+                except Exception: continue
+                name=meta.get('name') or meta.get('image_name')
+                if not isinstance(name,str) or not (path.parent/'README.md').exists():continue
+                rel=(path.parent/'README.md').relative_to(CACHE/src).as_posix()
+                recipes[(REPOS[src],name)]={'meta':meta,'readme':path.parent/'README.md','repo':REPOS[src],'commit':commits[src],'path':rel,
+                    'build':meta.get('build_system') or ('PGRX' if rel.startswith('pgrx/') else 'Universe' if rel.startswith('universe/') else 'Debian')}
+                routes[(REPOS[src],rel)]='extensions/'+name
+            routes[(REPOS[src],'README.md')]='get-started'
+        entries=[]
+        content=ROOT/'content/extensions';content.mkdir(parents=True,exist_ok=True)
+        for old in content.glob('*/index.md'): old.unlink()
+        for name in sorted({j['name'] for j in jobs}):
+            variants=sorted([i for i in images if i['name']==name],key=lambda i:(i['distro']!='trixie',-i['pg']))
+            publisher='cloudnative-pg' if '/cloudnative-pg/' in variants[0]['reference'] else 'cnpg-extensions'
+            repo=publisher+'/postgres-extensions-containers';recipe=recipes.get((repo,name))
+            if not recipe:
+                # Some upstream recipes use a different image_name. Match README directory from the catalog name.
+                source='upstream' if publisher=='cloudnative-pg' else 'source'
+                found=list((CACHE/source).rglob(name+'/README.md'))
+                if found: recipe={'meta':{},'readme':found[0],'repo':repo,'commit':commits[source],'path':found[0].relative_to(CACHE/source).as_posix(),'build':'Debian'}
+            if not recipe: raise RuntimeError('No source README found for published extension '+name)
+            text=recipe['readme'].read_text()
+            soup=BeautifulSoup(markdown.markdown(text),'html.parser');first=soup.find('p')
+            description=first.get_text(' ',strip=True) if first else name
+            entry={'name':name,'title':name,'sqlName':recipe['meta'].get('sql_name',''),'description':description,'publisher':publisher,'build':'PGRX' if recipe['build'].lower()=='pgrx' else recipe['build'].capitalize(),
+                'source':f"https://github.com/{repo}/blob/main/{recipe['path']}", 'variants':variants,
+                'version':variants[0]['version'],'distros':sorted({i['distro'] for i in variants}),'pgVersions':sorted({i['pg'] for i in variants}),
+                'declaredLicenses':recipe['meta'].get('licenses',[])}
+            entries.append(entry)
+            directory=content/name;directory.mkdir(exist_ok=True)
+            fm={'title':entry['title'],'description':description,'extension':name,'layout':'extension'}
+            body=readme_html(text,repo,recipe['commit'],recipe['path'],routes)
+            (directory/'index.md').unlink(missing_ok=True)
+            fm['type'] = 'extensions'
+            (directory/'_index.md').write_text('---\n'+yaml.safe_dump(fm,sort_keys=False)+'---\n'+body+'\n')
             tab_body=readme_html(text,repo,recipe['commit'],recipe['path'],routes,depth=3)
-            (tab_directory/'index.md').write_text('---\n'+yaml.safe_dump(tab_fm,sort_keys=False)+'---\n'+tab_body+'\n')
+            for view in ('overview', 'documentation', 'dependencies', 'licenses'):
+                tab_directory = directory/view
+                tab_directory.mkdir(exist_ok=True)
+                tab_fm = dict(fm, view=view)
+                (tab_directory/'index.md').write_text('---\n'+yaml.safe_dump(tab_fm,sort_keys=False)+'---\n'+tab_body+'\n')
     from scorecard_data import generate_scorecards
-    generate_scorecards()
+    timed("scorecards")(generate_scorecards)()
     from version_history import generate_history
-    generate_history(entries, refresh_extension=args.refresh_extension)
+    if args.merge_history:
+        from history_evidence import verify
+        timed("history assembly")(verify)(ROOT, entries, commits)
+    else:
+        timed("history")(generate_history)(entries, refresh_extension=args.refresh_extension)
     result={'generatedAt':NOW,'sourceRefreshedAt':source_refreshed_at,'commits':commits,'count':len(entries),'extensions':entries,'database':database}
     (ROOT/'data').mkdir(exist_ok=True)
     (ROOT/'data/generated.json').write_text(json.dumps(result))
