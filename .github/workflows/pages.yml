@@ -1,7 +1,7 @@
 name: Build and publish website
 on:
   push:
-    branches: [main, 'ci/**']
+    branches: [main]
   workflow_dispatch:
     inputs:
       rebuild_history:
