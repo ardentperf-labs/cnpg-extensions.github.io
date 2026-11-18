@@ -5,9 +5,7 @@ import unittest
 from unittest.mock import Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-spec = importlib.util.spec_from_file_location('preview_versions', Path(__file__).resolve().parents[1] / 'scripts/preview-versions.py')
-history = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(history)
+import version_history as history
 
 
 class HistoryTests(unittest.TestCase):
@@ -96,7 +94,7 @@ class HistoryTests(unittest.TestCase):
             root=Path(directory)
             (root/'data').mkdir()
             (root/'data/generated.json').write_text(json.dumps({'extensions':entries}))
-            with patch.object(history,'ROOT',root), patch.object(sys,'argv',['preview-versions.py','--all','--full-refresh']), patch.object(history,'refresh_entry') as refresh, patch.object(history,'mark_complete'):
+            with patch.object(history,'ROOT',root), patch.object(sys,'argv',['preview-versions.py','--all','--full-refresh']), patch.object(history,'refresh_entry') as refresh, patch.object(history,'install_history'):
                 history.main()
             self.assertEqual(refresh.call_args_list,[call(entries[0],True),call(entries[1],True)])
 

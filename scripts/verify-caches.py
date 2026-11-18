@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Hosted integration check: populate real caches, then prove reuse on a fresh runner."""
-import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -10,9 +9,8 @@ import yaml
 from generate import Registry, ROOT
 from image_notices import container_notices
 
-spec = importlib.util.spec_from_file_location('history', ROOT / 'scripts/preview-versions.py')
-history = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(history)
+import version_history as history
+
 phase = sys.argv[1]
 fixture = ROOT / '.cache/cache-verification.json'
 if phase == 'populate':
@@ -34,6 +32,9 @@ if phase == 'populate':
     print('COLD CACHE: fetched real semver history and extracted real image notices.', flush=True)
 elif phase == 'restore':
     saved = json.loads(fixture.read_text())
+    registry = Registry(saved['entry']['variants'][0]['reference'])
+    with patch.object(registry.session, 'get', side_effect=AssertionError('Unexpected OCI fetch')):
+        registry.get(registry.digest)
     before = json.loads((ROOT / '.cache/version-history/history.json').read_text())['semver']['builds']
     with patch.object(history, 'read_build', side_effect=AssertionError('Unexpected manifest fetch')) as manifests, patch.object(history, 'add_image_links', side_effect=AssertionError('Unexpected GitHub HTML fetch')) as links:
         history.refresh_entry(saved['entry'])

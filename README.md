@@ -28,52 +28,35 @@ not run), or reuse the existing generated data and run just Hugo. Omitting
 sources and scans. Do not commit generated data or reports; reproduce them at build
 time. Full reports are available as downloads in the published site.
 
-The local Hugo server also exposes a Versions tab design preview. To collect and
-publish a complete local snapshot from the generated catalog:
+The website generator retrieves assets directly and saves them for reuse. The nightly
+website workflow restores the previous `website-assets-v1-*` artifact, runs the
+generator, and uploads the resulting assets again with **seven-day retention**.
+There is no separate history workflow or snapshot publication step.
+
+Saved assets include digest-addressed OCI metadata/SBOMs, extracted license notices,
+and version-history metadata with verified GHCR links. History refreshes still list
+tags to discover new builds and remove deleted tags; unchanged build records avoid
+manifest and GitHub HTML requests. Advisory databases refresh and scans rerun each
+build so new advisories are detected for unchanged images. Source checkouts refresh
+normally. Changes to the notice extractor invalidate the saved artifact name.
+
+Each successfully retrieved asset is saved as it is processed, including when a
+later retrieval fails. The workflow retains those assets for the next attempt.
+History retrieval failures fail the build; Hugo's history data is replaced only
+after all extensions finish successfully. Failed builds never deploy.
+
+On a manual website run, **Ignore all saved website assets and retrieve them again**
+(`rebuild_cache`) bypasses restoration and repopulates all asset caches. Alternatively,
+set **Refetch assets for one extension** (`refresh_extension`, for example `semver`)
+to refresh that extension's OCI data, notices, and history while reusing the rest.
+Locally use `--rebuild-cache` or `--refresh-extension semver` with `generate.py`.
+Neither option reuses prior vulnerability scan results.
+
+For a history-only local refresh using the same retrieval code:
 
 ```sh
-.venv/bin/python scripts/preview-versions.py --all
-.venv/bin/python scripts/version_history_snapshot.py publish .cache/version-history/history.json data/generated.json .cache/history-release/version-history.json
-.venv/bin/python scripts/version_history_snapshot.py install .cache/history-release/version-history.json
+python scripts/preview-versions.py --all
 ```
-
-The collector writes only the private `.cache/version-history/history.json` cache;
-it never writes Hugo data. You can refresh one extension with
-`scripts/preview-versions.py semver`, but publication requires every catalog entry.
-Normal refreshes list tags, reuse saved manifest metadata and verified GitHub links,
-and fetch only new records or records whose catalog digest changed. Removed tags
-disappear from the next successful refresh. Timestamped historical tags are treated
-as append-only; use `--full-refresh` to recheck historical retagging and links.
-Failed collection leaves Hugo's previously installed data untouched. The explicit
-publish and install steps validate and atomically install a complete snapshot.
-Publication requires the completion receipt written by a successful `--all` run;
-its hashes must match both the candidate history and the input catalog.
-
-History collection and site publishing use separate, chained workflows. The **Refresh versions history**
-workflow runs daily at 09:30 UTC or manually. It incrementally updates the private
-`.cache/version-history/history.json` cache. Successful extensions remain cached
-if a later extension fails, but no public snapshot is uploaded unless the full
-refresh and validation succeed. Enable **Refetch all version-history metadata and
-image links** on that workflow to bypass its cache. Bump `history-progress-v1` when
-making incompatible cache-format changes.
-
-Site builds never restore this private cache or run history collection. They import
-the newest retained `versions-history-snapshot` artifact from a completed,
-successful history-workflow run on `main`. Failed, cancelled, and in-progress runs
-are ineligible, even if they uploaded an artifact. Snapshot schema and contents
-are validated before atomically replacing Hugo's `data/version_history.json`.
-Malformed snapshots stop the site build, preserving the deployed site. If no
-successful snapshot exists yet (or all have expired), the site builds with current
-catalog data only. The Versions tab appears in production once a snapshot exists.
-Artifacts are retained for 90 days; collection failures leave the last successful
-snapshot available for subsequent site builds. When history collection on `main`
-finishes, the website workflow runs regardless of its outcome. Collection failures
-remain failed Actions runs, with an error annotation; the website summary links to
-the unsuccessful run. Enable GitHub Actions failure notifications to receive alerts.
-The site uses the latest successful snapshot, never partially collected history.
-Both workflows queue overlapping runs instead of replacing pending runs (up to
-GitHub's 100-run queue limit). The chained trigger becomes active once the workflow
-is on the default branch.
 
 ## Sources of truth
 
@@ -137,8 +120,7 @@ Scanner failures remain explicit and do not become zero findings. Revisit the wo
 ## GitHub Pages
 
 In repository Settings → Pages, choose **GitHub Actions** as the source. The workflow
-builds on pushes to main, manually, and after the daily 09:30 UTC history
-workflow finishes (whether it succeeds or fails). Pull requests do not run this
+builds on pushes to main, manually, and nightly at 10:30 UTC. Pull requests do not run this
 workflow; run the local validation commands before pushing.
 Nightly builds fetch fresh source/catalog revisions and update Grype's database.
 GitHub's scheduled workflows can be delayed and may be disabled after repository
@@ -184,15 +166,15 @@ from an inspected image with no notice files.
 
 Generation requires an accessible Docker daemon (provided by the Ubuntu GitHub
 Actions runner). Successful notice results are cached by immutable platform digest
-in `.cache/image-notices-v1` and persisted between GitHub Actions builds. Restored
+in `.cache/image-notices-v1` and included in the seven-day website-assets artifact. Restored
 results skip Docker pull, create, and export entirely; new digests are extracted
 and failures are retried on the next build. Cache eviction can require extraction
-again. Changes to `scripts/image_notices.py` automatically invalidate the CI cache.
+again. Changes to `scripts/image_notices.py` automatically invalidate the saved website-assets artifact.
 
 To force extraction for all current images, manually run the website workflow with
-**Re-extract license notices from every current image** enabled. This bypasses the
-notice-cache restore and saves fresh results for subsequent builds. Locally, remove
-`.cache/image-notices-v1` before generation. Advisory scans still refresh normally.
+**Ignore all saved website assets and retrieve them again** enabled, or specify one
+extension with `refresh_extension`. Fresh results are saved for subsequent builds.
+Locally, use `--rebuild-cache` or `--refresh-extension NAME`. Advisory scans still refresh normally.
 
 ## Weekly upstream Scorecard reports
 

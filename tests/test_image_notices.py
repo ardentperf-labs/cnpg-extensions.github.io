@@ -64,3 +64,14 @@ class NoticeTests(unittest.TestCase):
                     self.assertEqual(result['status'],'unavailable')
                 self.assertEqual(run.call_count,2)
             self.assertFalse((Path(directory)/'image-notices-v1'/'sha256-abc.json').exists())
+
+    def test_refresh_bypasses_saved_notices(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache=Path(directory)/'image-notices-v1'
+            cache.mkdir()
+            (cache/'sha256-abc.json').write_text(json.dumps({'status':'available','files':[]}))
+            with patch('image_notices.subprocess.run',side_effect=OSError('offline')) as run:
+                result=container_notices('ghcr.io/org/image@sha256:index','amd64','sha256:abc',directory,refresh=True)
+                self.assertEqual(result['status'],'unavailable')
+                run.assert_called_once()
+            self.assertFalse((cache/'sha256-abc.json').exists())
