@@ -19,7 +19,7 @@ if phase == 'populate':
     response = requests.get('https://raw.githubusercontent.com/cnpg-extensions/artifacts/main/image-catalogs-extensions/catalog-minimal-trixie.yaml', timeout=60)
     response.raise_for_status()
     catalog = yaml.safe_load(response.text)
-    item = next(e for image in catalog['spec']['images'] for e in image['extensions'] if e['name'] == 'semver')
+    item = next(e for image in catalog['spec']['images'] for e in image.get('extensions', []) if e['name'] == 'semver')
     reference = item['image']['reference']
     entry = {'name': 'semver', 'variants': [{'reference': reference}]}
     (ROOT / 'data').mkdir(exist_ok=True)
