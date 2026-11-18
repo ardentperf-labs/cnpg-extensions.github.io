@@ -159,7 +159,8 @@ blobs are cached across builds; advisory scans are rerun rather than cached.
 ## Build performance
 
 The website workflow distributes current catalog images across four scan jobs.
-Each job runs the pinned, unmodified Grype once per platform and batches OSV
+Version history refreshes in a parallel job, since it does not depend on scans.
+Each scan job runs the pinned, unmodified Grype once per platform and batches OSV
 inputs in groups of at most 512 unchanged SBOMs. Advisory databases are refreshed
 on every run. The assembly job accepts only a complete set of fresh evidence from
 that workflow run, with exact catalog coverage, matching source commits and matching

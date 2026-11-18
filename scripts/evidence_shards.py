@@ -28,6 +28,8 @@ def database_identity(database, osv_database):
 def check_reports(images, static):
     for image in images:
         for platform in image['platforms']:
+            if platform.get('containerNotices', {}).get('status') not in ('available', 'unavailable'):
+                raise RuntimeError('Evidence lacks fresh container notice inspection')
             if platform['status'] != 'available':
                 continue
             arch = platform['architecture']

@@ -62,8 +62,39 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 1
+  history:
+    name: Refresh version history
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: ./.github/actions/prepare-website
+        with:
+          rebuild-cache: ${{ inputs.rebuild_cache }}
+      - name: Retrieve current version history
+        env:
+          REFRESH_EXTENSION: ${{ inputs.refresh_extension }}
+        run: |
+          args=()
+          if [[ -n "$REFRESH_EXTENSION" ]]; then args+=(--refresh-extension "$REFRESH_EXTENSION"); fi
+          python scripts/history_evidence.py "${args[@]}"
+      - name: Save history and retrieved assets
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-evidence-history
+          overwrite: true
+          path: |
+            .cache/version-history
+            .cache/history-commits.json
+            data/version_history.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
   build:
-    needs: inspect
+    needs: [inspect, history]
     if: ${{ always() && !cancelled() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -79,18 +110,21 @@ jobs:
         with:
           pattern: website-evidence-*
           merge-multiple: true
-      - name: Require successful scans
+      - name: Require successful scans and history
         env:
           INSPECT_RESULT: ${{ needs.inspect.result }}
-        run: test "$INSPECT_RESULT" = success
+          HISTORY_RESULT: ${{ needs.history.result }}
+        run: |
+          test "$INSPECT_RESULT" = success
+          test "$HISTORY_RESULT" = success
       - name: Test metadata processing
         run: python -m unittest discover -s tests -v
-      - name: Generate website data and retrieve history
+      - name: Assemble fresh evidence and website data
         env:
           GH_TOKEN: ${{ github.token }}
           REFRESH_EXTENSION: ${{ inputs.refresh_extension }}
         run: |
-          args=(--refresh --merge-evidence)
+          args=(--refresh --merge-evidence --merge-history)
           if [[ -n "$REFRESH_EXTENSION" ]]; then args+=(--refresh-extension "$REFRESH_EXTENSION"); fi
           python scripts/generate.py "${args[@]}"
       - name: Save website assets for the next build

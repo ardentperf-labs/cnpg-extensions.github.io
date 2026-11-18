@@ -245,6 +245,7 @@ def main():
     mode.add_argument('--reuse-evidence', action='store_true', help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
     mode.add_argument('--evidence-only', action='store_true', help='Scan one catalog partition and save its evidence and notices')
     mode.add_argument('--merge-evidence', action='store_true', help='Validate and assemble scanned catalog partitions')
+    parser.add_argument('--merge-history', action='store_true', help='Use verified history retrieved in this workflow run')
     parser.add_argument('--shard-index', type=int, help='Zero-based index of the partition to scan')
     parser.add_argument('--shard-count', type=int, help='Total number of catalog partitions')
     parser.add_argument('--rebuild-cache', action='store_true', help='Ignore saved OCI assets, license notices, and version history')
@@ -259,6 +260,8 @@ def main():
             parser.error('--evidence-only requires a shard index between zero and shard count minus one')
     elif args.shard_index is not None or args.shard_count is not None:
         parser.error('--shard-index and --shard-count require --evidence-only')
+    if args.merge_history and not args.merge_evidence:
+        parser.error('--merge-history requires --merge-evidence')
     if args.merge_evidence and args.scan:
         parser.error('--merge-evidence already consumes scanned evidence')
     if args.rebuild_cache and (args.reuse_evidence or args.merge_evidence):
@@ -343,16 +346,17 @@ def main():
                     platform['packages']=packages(spdx)
                     platform['noticeFiles']=notice_files(spdx)
     # Read shipped notices for every publisher, independently of SBOM availability.
-    with phase("license notices"):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            pending=[]
-            for image in images:
-                for platform in image['platforms']:
-                    pending.append((platform, pool.submit(timed("notices")(container_notices),
-                        image['reference'], platform['architecture'], platform['digest'], CACHE,
-                        refresh=image['name']==args.refresh_extension and not args.merge_evidence)))
-            for platform, future in pending:
-                platform['containerNotices']=future.result()
+    if not args.merge_evidence:
+        with phase("license notices"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+                pending=[]
+                for image in images:
+                    for platform in image['platforms']:
+                        pending.append((platform, pool.submit(timed("notices")(container_notices),
+                            image['reference'], platform['architecture'], platform['digest'], CACHE,
+                            refresh=image['name']==args.refresh_extension and not args.merge_evidence)))
+                for platform, future in pending:
+                    platform['containerNotices']=future.result()
     if args.evidence_only:
         output_shard.write_text(json.dumps({'shardIndex': args.shard_index, 'shardCount': args.shard_count,
                                            'commits': commits, 'database': database,
@@ -401,16 +405,20 @@ def main():
             (directory/'index.md').unlink(missing_ok=True)
             fm['type'] = 'extensions'
             (directory/'_index.md').write_text('---\n'+yaml.safe_dump(fm,sort_keys=False)+'---\n'+body+'\n')
+            tab_body=readme_html(text,repo,recipe['commit'],recipe['path'],routes,depth=3)
             for view in ('overview', 'documentation', 'dependencies', 'licenses'):
                 tab_directory = directory/view
                 tab_directory.mkdir(exist_ok=True)
                 tab_fm = dict(fm, view=view)
-                tab_body=readme_html(text,repo,recipe['commit'],recipe['path'],routes,depth=3)
                 (tab_directory/'index.md').write_text('---\n'+yaml.safe_dump(tab_fm,sort_keys=False)+'---\n'+tab_body+'\n')
     from scorecard_data import generate_scorecards
     timed("scorecards")(generate_scorecards)()
     from version_history import generate_history
-    timed("history")(generate_history)(entries, refresh_extension=args.refresh_extension)
+    if args.merge_history:
+        from history_evidence import verify
+        timed("history assembly")(verify)(ROOT, entries, commits)
+    else:
+        timed("history")(generate_history)(entries, refresh_extension=args.refresh_extension)
     result={'generatedAt':NOW,'sourceRefreshedAt':source_refreshed_at,'commits':commits,'count':len(entries),'extensions':entries,'database':database}
     (ROOT/'data').mkdir(exist_ok=True)
     (ROOT/'data/generated.json').write_text(json.dumps(result))

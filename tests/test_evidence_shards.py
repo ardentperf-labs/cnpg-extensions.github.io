@@ -117,6 +117,7 @@ class MergeEvidenceTests(unittest.TestCase):
         sbom = Path('reports/one/trixie-pg18-amd64.spdx.json')
         grype = sbom.with_suffix('.grype.json')
         platform = {'architecture': 'amd64', 'status': 'available', 'sbom': sbom.as_posix(),
+                    'containerNotices': {'status': 'unavailable'},
                     'scan': {'status': 'scanned', 'report': grype.as_posix()},
                     'osvScan': {'status': 'unavailable'}}
         self.shards[0]['images'][0]['platforms'] = [platform]
@@ -128,6 +129,10 @@ class MergeEvidenceTests(unittest.TestCase):
         (self.static / grype).write_text('{}')
         images, _ = self.merge()
         self.assertEqual(images[0]['platforms'], [platform])
+        del platform['containerNotices']
+        self.write_shards()
+        with self.assertRaisesRegex(RuntimeError, 'fresh container notice'):
+            self.merge()
 
 
 class EvidenceOnlyTests(unittest.TestCase):
