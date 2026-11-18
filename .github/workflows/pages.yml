@@ -2,12 +2,19 @@ name: Build and publish website
 on:
   push:
     branches: [main]
-  pull_request:
   workflow_dispatch:
-  schedule:
-    - cron: '30 10 * * *'
+    inputs:
+      rebuild_notices:
+        description: Re-extract license notices from every current image
+        type: boolean
+        default: false
+  workflow_run:
+    workflows: [Refresh versions history]
+    types: [completed]
+    branches: [main]
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: website-${{ github.ref }}
   cancel-in-progress: false
@@ -16,6 +23,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      - name: Report unsuccessful history refresh
+        if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success' }}
+        env:
+          HISTORY_RUN_URL: ${{ github.event.workflow_run.html_url }}
+          HISTORY_RESULT: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          echo "::warning::Versions history refresh ended with $HISTORY_RESULT. Building with the latest successful snapshot, or current catalog if none exists."
+          echo "History refresh: [$HISTORY_RESULT]($HISTORY_RUN_URL). This build uses the latest successful snapshot, or current catalog if none exists." >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -31,10 +46,26 @@ jobs:
           path: .cache/oci
           key: oci-${{ runner.os }}-${{ github.run_id }}
           restore-keys: oci-${{ runner.os }}-
+      - name: Restore immutable image notices
+        if: ${{ !inputs.rebuild_notices }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .cache/image-notices-v1
+          key: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-
       - name: Test metadata processing
         run: python -m unittest discover -s tests -v
       - name: Refresh catalog, READMEs, SBOMs, container notices, and advisory matches
         run: python scripts/generate.py --refresh --scan --workers 4
+      - name: Save immutable image notices
+        uses: actions/cache/save@v4
+        with:
+          path: .cache/image-notices-v1
+          key: notices-${{ runner.os }}-${{ hashFiles('scripts/image_notices.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Import latest successful versions snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/version_history_snapshot.py import
       - name: Build Hugo
         run: hugo --minify --baseURL 'https://cnpg-extensions.github.io/'
       - name: Validate generated output
@@ -43,7 +74,7 @@ jobs:
         with:
           path: public
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.repository == 'cnpg-extensions/cnpg-extensions.github.io' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-24.04
     permissions:

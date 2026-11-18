@@ -2,9 +2,36 @@ const root = document.documentElement;
 const media = matchMedia('(prefers-color-scheme: dark)');
 let preference = 'system';
 try { preference = localStorage.getItem('cnpg-mode') || 'system'; } catch {}
-function applyMode() { root.dataset.mode = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference; document.querySelector('.mode-toggle')?.setAttribute('aria-label', `Current theme: ${root.dataset.mode}. Switch to ${root.dataset.mode === 'dark' ? 'light' : 'dark'} mode`); }
+if (!['system', 'light', 'dark'].includes(preference)) preference = 'system';
+const favicon = document.getElementById('site-favicon');
+function applyFavicon() {
+ if (favicon) favicon.href = media.matches ? favicon.dataset.dark : favicon.dataset.light;
+}
+applyFavicon();
+media.addEventListener('change', applyFavicon);
+const themeButton = document.querySelector('.theme-switcher');
+const themeModes = ['system', 'light', 'dark'];
+function applyMode() {
+ root.dataset.mode = preference === 'system' ? (media.matches ? 'dark' : 'light') : preference;
+ const next = themeModes[(themeModes.indexOf(preference) + 1) % themeModes.length];
+ const label = `Theme: ${preference === 'system' ? 'System (automatic)' : preference === 'light' ? 'Light' : 'Dark'}. Switch to ${next === 'system' ? 'System' : next === 'light' ? 'Light' : 'Dark'}.`;
+ if (themeButton) {
+  themeButton.title = label;
+  themeButton.setAttribute('aria-label', label);
+  themeButton.querySelectorAll('[data-theme-icon]').forEach(icon => { icon.hidden = icon.dataset.themeIcon !== preference; });
+ }
+}
 applyMode(); media.addEventListener('change', applyMode);
-document.querySelector('.mode-toggle')?.addEventListener('click', () => { preference = root.dataset.mode === 'dark' ? 'light' : 'dark'; try { localStorage.setItem('cnpg-mode', preference); } catch {} applyMode(); });
+themeButton?.addEventListener('click', () => {
+ preference = themeModes[(themeModes.indexOf(preference) + 1) % themeModes.length];
+ try { localStorage.setItem('cnpg-mode', preference); } catch {}
+ applyMode();
+});
+window.addEventListener('storage', event => {
+ if (event.key !== 'cnpg-mode' && event.key !== null) return;
+ preference = ['light', 'dark'].includes(event.newValue) ? event.newValue : 'system';
+ applyMode();
+});
 const menu = document.getElementById('menu-toggle');
 menu?.addEventListener('click', () => { const nav = document.getElementById('mobile-nav'); nav.hidden = !nav.hidden; menu.setAttribute('aria-expanded', String(!nav.hidden)); });
 async function copyText(text, button, code) {
@@ -49,7 +76,7 @@ if (search) {
 }
 requestAnimationFrame(() => requestAnimationFrame(() => root.classList.add('ready')));
 
-// Enhance ordinary document anchors into two views; without JS both remain readable.
+// Enhance ordinary document anchors into tabs; without JS all sections remain readable.
 const detail = document.querySelector('.extension-redesign');
 if (detail) {
  const nav = detail.querySelector('.detail-view-nav');
@@ -61,13 +88,38 @@ if (detail) {
  function showView(id, updateURL = false) {
   tabs.forEach(tab => {const selected = tab.dataset.detailView === id;tab.setAttribute('aria-selected',String(selected));tab.tabIndex = selected ? 0 : -1;});
   views.forEach(view => view.hidden = view.id !== id);
-  if(updateURL) { const url = new URL(location.href);url.hash = id;history.pushState(null,'',url); }
+  const selectedTab = tabs.find(tab => tab.dataset.detailView === id);
+  if (selectedTab) {
+   const tabBounds = selectedTab.getBoundingClientRect(), navBounds = nav.getBoundingClientRect();
+   if (tabBounds.left < navBounds.left) nav.scrollLeft -= navBounds.left - tabBounds.left;
+   else if (tabBounds.right > navBounds.right) nav.scrollLeft += tabBounds.right - navBounds.right;
+  }
+  detail.querySelector('.inventory-controls').hidden = id === 'documentation' || id === 'versions';
+  if(updateURL) { const url = new URL(location.href);url.pathname = new URL(tabs.find(tab => tab.dataset.detailView === id).href).pathname;url.hash = new URL(tabs.find(tab => tab.dataset.detailView === id).href).hash;history.pushState(null,'',url); }
  }
  tabs.forEach((tab,i) => {
   tab.addEventListener('click',e=>{e.preventDefault();showView(tab.dataset.detailView,true);});
   tab.addEventListener('keydown',e=>{let next;if(e.key==='ArrowRight')next=(i+1)%tabs.length;if(e.key==='ArrowLeft')next=(i+tabs.length-1)%tabs.length;if(e.key==='Home')next=0;if(e.key==='End')next=tabs.length-1;if(next!==undefined){e.preventDefault();tabs[next].focus();showView(tabs[next].dataset.detailView,true);}});
  });
- const syncView = () => showView(location.hash === '#image-evidence' ? 'image-evidence' : 'readme');syncView();window.addEventListener('hashchange',syncView);
+ detail.querySelectorAll('[data-open-view]').forEach(link => link.addEventListener('click', event => {event.preventDefault();if(link.hasAttribute("data-clear-dependency-filters")){nameFilter.value="";licenseFilter.value="";advisoryFilter.checked=false;filterDependencies();}if(link.hasAttribute("data-filter-advisories")){nameFilter.value="";licenseFilter.value="";advisoryFilter.checked=true;filterDependencies();}showView(link.dataset.openView, true);tabs.find(tab => tab.dataset.detailView === link.dataset.openView)?.focus();}));
+ const legacyViews = new Map([['readme','documentation'],['image-evidence','dependencies'],['image-licenses','licenses']]);
+ const syncView = () => {
+  const fragment = location.hash.slice(1);
+  const pathView = location.pathname.split('/').filter(Boolean).at(-1);
+  const id = legacyViews.get(fragment) || (views.some(view => view.id === fragment) ? fragment : fragment ? 'documentation' : pathView);
+  const known = views.some(view => view.id === id);
+  if (views.some(view => view.id === fragment) || legacyViews.has(fragment)) {
+   const url = new URL(location.href);
+   url.pathname = new URL(tabs.find(tab => tab.dataset.detailView === id).href).pathname;
+   url.hash = new URL(tabs.find(tab => tab.dataset.detailView === id).href).hash;
+   history.replaceState(null, '', url);
+  }
+  showView(known ? id : detail.dataset.defaultView);
+  if (known) requestAnimationFrame(() => detail.querySelector('.extension-heading').scrollIntoView({block:'start',behavior:'instant'}));
+ };
+ syncView();
+ window.addEventListener('hashchange',syncView);
+ window.addEventListener('popstate',syncView);
  const contents = detail.querySelector('.readme-nav');const contentsNav = contents.querySelector('nav');
  detail.querySelectorAll('.readme-content h2[id], .readme-content h3[id]').forEach(heading=>{const a=document.createElement('a');a.href=`#${heading.id}`;a.textContent=heading.textContent;a.className=heading.tagName==='H3'?'contents-subheading':'';contentsNav.append(a);});
  if(contentsNav.children.length){
@@ -76,18 +128,55 @@ if (detail) {
   const adaptContents=()=>{contents.querySelector('details').open=wideReadme.matches;};
   adaptContents();wideReadme.addEventListener('change',adaptContents);
  }
- const imageChoice=document.getElementById('image-choice');const archChoice=document.getElementById('architecture-choice');const panels=[...detail.querySelectorAll('.inventory-panel')];
- detail.querySelector('.inventory-controls').hidden=false;
- const defaultImage=imageChoice.value;
- function showImage(updateURL){panels.forEach(panel=>panel.hidden=panel.dataset.variant!==imageChoice.value||panel.dataset.architecture!==archChoice.value);if(updateURL){const url=new URL(location.href);url.searchParams.set('image',imageChoice.value);url.searchParams.set('arch',archChoice.value);url.searchParams.delete('dependency');history.replaceState(null,'',url);}}
- function setArchitectures(preferred){const architectures=[...new Set(panels.filter(p=>p.dataset.variant===imageChoice.value).map(p=>p.dataset.architecture))];archChoice.replaceChildren(...architectures.map(arch=>new Option(arch==='unavailable'?'Unavailable':arch,arch)));archChoice.value=architectures.includes(preferred)?preferred:(architectures.includes('amd64')?'amd64':architectures[0]);}
+ const imageChoice=document.getElementById('image-choice');const panels=[...detail.querySelectorAll('.inventory-panel')];
+
+ const dependencyFilters=detail.querySelector('.dependency-filters');
+ const nameFilter=dependencyFilters.elements.package;
+ const licenseFilter=dependencyFilters.elements.license;
+ const advisoryFilter=dependencyFilters.elements.advisories;
+ function filterDependencies() {
+  const panel=detail.querySelector('#dependencies .inventory-panel:not([hidden])');
+  const table=panel?.querySelector('.dependency-table');
+  dependencyFilters.hidden=!table;
+  if(!table)return;
+  const scanned=table.dataset.scanned==='true';
+  advisoryFilter.disabled=!scanned;
+  advisoryFilter.closest('label').title=scanned?'Show packages with one or more Grype or OSV advisory matches':'No scan is available for this image';
+  const rows=[...table.querySelectorAll('tbody tr')];
+  const name=nameFilter.value.trim().toLowerCase();
+  const license=licenseFilter.value.trim().toLowerCase();
+  let count=0;
+  rows.forEach(row=>{
+   const matches=row.dataset.package.toLowerCase().includes(name)&&row.cells[1].textContent.toLowerCase().includes(license)&&(!advisoryFilter.checked||!scanned||Number(row.dataset.advisories)>0);
+   row.hidden=!matches;if(matches)count++;
+  });
+  panel.querySelector('[data-filter-result]').textContent=`${count} of ${rows.length} packages`;
+  panel.querySelector('.dependency-table-scroll').hidden=count===0;
+  panel.querySelector('.dependency-no-results').hidden=count!==0;
+ }
+ dependencyFilters.addEventListener('submit',event=>event.preventDefault());
+ dependencyFilters.addEventListener('input',filterDependencies);
+ dependencyFilters.addEventListener('reset',()=>setTimeout(filterDependencies,0));
+ const imageOptions=[...imageChoice.options];
+ const firstVariant=imageOptions[0]?.dataset.variant;
+ const defaultOption=imageOptions.find(option=>option.dataset.variant===firstVariant&&option.dataset.architecture==='amd64')||imageOptions[0];
+ function showImage(updateURL){
+  const selected=imageChoice.selectedOptions[0];
+  if(!selected)return;
+  const {variant,architecture}=selected.dataset;
+  panels.forEach(panel=>panel.hidden=panel.dataset.variant!==variant||panel.dataset.architecture!==architecture);
+  filterDependencies();
+  if(updateURL){const url=new URL(location.href);url.searchParams.set('image',variant);url.searchParams.set('arch',architecture);url.searchParams.delete('dependency');history.replaceState(null,'',url);}
+ }
  function restoreImage(){
   const params=new URLSearchParams(location.search);
-  imageChoice.value=[...imageChoice.options].some(o=>o.value===params.get('image'))?params.get('image'):defaultImage;
-  setArchitectures(params.get('arch'));showImage(false);syncView();
+  const variant=params.get('image')||firstVariant;
+  const selected=imageOptions.find(option=>option.dataset.variant===variant&&option.dataset.architecture===(params.get('arch')||'amd64'))||imageOptions.find(option=>option.dataset.variant===variant)||defaultOption;
+  if(selected)imageChoice.value=selected.value;
+  showImage(false);syncView();
  }
  restoreImage();window.addEventListener('popstate',restoreImage);
- imageChoice.addEventListener('change',()=>{setArchitectures(archChoice.value);showImage(true);});archChoice.addEventListener('change',()=>showImage(true));
+ imageChoice.addEventListener('change',()=>showImage(true));
 }
 
 const extensionBrowser = document.querySelector('.extension-browser');
@@ -150,3 +239,27 @@ if (guide) {
  });
  revealGuideAnchor();
 }
+
+// Keep navigation within this site in the current tab; isolate offsite pages.
+function setLinkTarget(link) {
+ const url = new URL(link.getAttribute('href'), document.baseURI);
+ const external = ['http:', 'https:'].includes(url.protocol) && url.origin !== location.origin;
+ if (external) {
+  link.target = '_blank';
+  link.relList.add('noopener', 'noreferrer');
+ } else {
+  link.removeAttribute('target');
+  link.relList.remove('noopener', 'noreferrer');
+ }
+}
+document.querySelectorAll('a[href]').forEach(setLinkTarget);
+new MutationObserver(records => {
+ for (const record of records) {
+  if (record.type === 'attributes') setLinkTarget(record.target);
+  for (const node of record.addedNodes) {
+   if (node.nodeType !== Node.ELEMENT_NODE) continue;
+   if (node.matches('a[href]')) setLinkTarget(node);
+   node.querySelectorAll('a[href]').forEach(setLinkTarget);
+  }
+ }
+}).observe(document.body, {childList: true, subtree: true, attributes: true, attributeFilter: ['href']});

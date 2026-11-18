@@ -5,6 +5,7 @@ No per-extension editorial data. Network failures are explicit, never zero findi
 import argparse, concurrent.futures, hashlib, json, os, re, shutil, subprocess, sys
 from datetime import datetime, timezone
 from image_notices import container_notices
+from osv_scan import scan_osv, refresh_database
 from guide_layout import getting_started
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit, parse_qs, unquote, quote
@@ -50,8 +51,40 @@ def advisory_url(package):
     if kind=='cargo' and not qualifiers.get('repository_url'):
         return 'https://deps.dev/cargo/'+quote(unquote(name),safe='')+'/'+quote(unquote(version),safe='')
     if kind=='deb' and name.startswith('debian/'):
-        source=qualifiers.get('upstream',[''])[0]
+        # Debian omits Source when source and binary names/versions match.
+        source=(qualifiers.get('upstream',[''])[0] or unquote(name.split('/',1)[1])).split('@',1)[0]
         if source: return 'https://security-tracker.debian.org/tracker/source-package/'+quote(source,safe='')
+    return ''
+
+def crate_url(package):
+    """Link crates.io identities using the installed version from SPDX."""
+    for ref in package.get('externalRefs', []):
+        if ref.get('referenceType') != 'purl':
+            continue
+        identity, _, query = ref.get('referenceLocator', '').partition('?')
+        if not identity.startswith('pkg:cargo/') or parse_qs(query).get('repository_url'):
+            continue
+        name, sep, version = identity.removeprefix('pkg:cargo/').rpartition('@')
+        if sep and name and version:
+            return 'https://crates.io/crates/' + quote(unquote(name), safe='') + '/' + quote(unquote(version), safe='')
+    return ''
+
+def image_package_url(reference):
+    """Use the catalog image repository rather than the extension recipe name."""
+    if not reference.startswith('ghcr.io/'):
+        return ''
+    repository = reference.removeprefix('ghcr.io/').split('@', 1)[0].split(':', 1)[0]
+    owner, sep, name = repository.partition('/')
+    if not owner or not sep or not name:
+        return ''
+    return 'https://github.com/orgs/' + quote(owner, safe='') + '/packages/container/package/' + quote(name, safe='')
+
+def package_ecosystem(package):
+    for ref in package.get('externalRefs', []):
+        if ref.get('referenceType') == 'purl':
+            purl = ref.get('referenceLocator', '')
+            if purl.startswith('pkg:'):
+                return purl[4:].split('/', 1)[0]
     return ''
 
 def packages(spdx):
@@ -59,7 +92,7 @@ def packages(spdx):
     return sorted([{'name':p['name'],'version':p.get('versionInfo','Not recorded'),
                     'declared':p.get('licenseDeclared','NOASSERTION'),
                     'concluded':p.get('licenseConcluded','NOASSERTION'),
-                    'files':p.get('licenseInfoFromFiles',[]),'advisoryURL':advisory_url(p)} for p in spdx.get('packages',[])],key=lambda p:(p['name'],p['version']))
+                    'files':p.get('licenseInfoFromFiles',[]),'ecosystem':package_ecosystem(p),'packageURL':crate_url(p),'advisoryURL':advisory_url(p)} for p in spdx.get('packages',[])],key=lambda p:(p['name'],p['version']))
 
 def notice_files(spdx):
     """Find notice paths in the shipped-file inventory, not embedded license records."""
@@ -118,7 +151,7 @@ def scan(sbom, grype, database):
             'findings':sorted(findings.values(),key=lambda v:(v['severity'],v['id'],v['package'])),
             'report':str(dest.relative_to(ROOT/'static'))}
 
-def inspect_image(item, grype, database):
+def inspect_image(item, grype, database, osv_database=None):
     result={**item,'platforms':[]}
     try:
         reg=Registry(item['reference']);index=reg.get(reg.digest)
@@ -147,6 +180,7 @@ def inspect_image(item, grype, database):
                 record.update(status='available',packages=packages(spdx),licenses=spdx.get('hasExtractedLicensingInfos',[]),sbom=str(dest.relative_to(ROOT/'static')))
                 try: record['scan']=scan(dest,grype,database)
                 except Exception as ex: record['scan']={'status':'unavailable','reason':str(ex)}
+                record['osvScan']=scan_osv(dest,ROOT,shutil.which('osv-scanner') if grype else None,osv_database)
             except Exception as ex: record['reason']=str(ex)
             result['platforms'].append(record)
         result['status']='available'
@@ -186,13 +220,16 @@ def readme_html(text, repo, commit, path, routes, depth=2):
             target=absolute.split('#')[0].split(f'/blob/{commit}/')[-1]
             if a.name=='img': absolute=urljoin(f'https://raw.githubusercontent.com/{repo}/{commit}/{path}',link)
             elif (repo,target) in routes: absolute='../'*depth+routes[(repo,target)]+('/#'+link.split('#',1)[1] if '#' in link else '/')
-            if a.name=='a' and target=='README.md' and '#quick-start' in link: absolute='../'*depth+'getting-started/'
+            if a.name=='a' and target=='README.md' and '#quick-start' in link: absolute='../'*depth+'get-started/'
             if a.name=='a' and target=='README.md' and '#supported-extensions' in link: absolute='../'*depth+'extensions/'
         a[key]=absolute
+        if a.name=='a' and urlsplit(absolute).scheme in ('http','https') and urlsplit(absolute).netloc != 'cnpg-extensions.github.io':
+            a['target']='_blank'
+            a['rel']='noopener noreferrer'
     # Source Markdown is content, not executable page code.
     import bleach
     tags={'a','p','div','span','h1','h2','h3','h4','h5','h6','ul','ol','li','pre','code','strong','em','blockquote','table','thead','tbody','tr','th','td','hr','br','img','details','summary','del','sup','sub'}
-    return bleach.clean(str(soup),tags=tags,attributes={'*':['id','class'],'a':['href','title'],'img':['src','alt','width','height'],'details':['open'],'span':['class','aria-hidden']},protocols=['http','https','mailto'],strip=True)
+    return bleach.clean(str(soup),tags=tags,attributes={'*':['id','class'],'a':['href','title','target','rel'],'img':['src','alt','width','height'],'details':['open'],'span':['class','aria-hidden']},protocols=['http','https','mailto'],strip=True)
 
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--refresh',action='store_true');parser.add_argument('--scan',action='store_true');parser.add_argument('--workers',type=int,default=4);parser.add_argument('--reuse-evidence',action='store_true',help='Local layout iteration only: reuse exact-digest evidence with original scan timestamps')
@@ -210,13 +247,13 @@ def main():
             try:
                 with path.open() as f: meta=hcl2.load(f,serialization_options=SerializationOptions(strip_string_quotes=True,with_comments=False)).get('metadata',{})
             except Exception: continue
-            name=meta.get('image_name') or meta.get('name')
+            name=meta.get('name') or meta.get('image_name')
             if not isinstance(name,str) or not (path.parent/'README.md').exists():continue
             rel=(path.parent/'README.md').relative_to(CACHE/src).as_posix()
             recipes[(REPOS[src],name)]={'meta':meta,'readme':path.parent/'README.md','repo':REPOS[src],'commit':commits[src],'path':rel,
                 'build':meta.get('build_system') or ('PGRX' if rel.startswith('pgrx/') else 'Universe' if rel.startswith('universe/') else 'Debian')}
             routes[(REPOS[src],rel)]='extensions/'+name
-        routes[(REPOS[src],'README.md')]='getting-started'
+        routes[(REPOS[src],'README.md')]='get-started'
     jobs=[]
     for cat in sorted((CACHE/'artifacts/image-catalogs-extensions').glob('catalog-*.yaml')):
         document=yaml.safe_load(cat.read_text());distro=document['metadata']['labels']['images.cnpg.io/os']
@@ -233,35 +270,35 @@ def main():
             raise RuntimeError('Cached evidence does not match current catalogs; regenerate it')
     else:
         grype=shutil.which('grype') if args.scan else None
-        if args.scan and not grype:raise RuntimeError('--scan requires Grype')
+        if args.scan and (not grype or not shutil.which('osv-scanner')):raise RuntimeError('--scan requires Grype and OSV-Scanner')
         database={}
         if grype:
             p=subprocess.run([grype,'db','update'],capture_output=True,text=True)
             if p.returncode: database={'error':'Vulnerability database update failed; no current scan is available.'}
             else: database=json.loads(run(grype,'db','status','-o','json'))
+        osv_database=refresh_database(ROOT) if args.scan else None
         images=[]
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
-            futures=[pool.submit(inspect_image,j,grype,database) for j in jobs]
+            futures=[pool.submit(inspect_image,j,grype,database,osv_database) for j in jobs]
             for f in concurrent.futures.as_completed(futures):
                 image=f.result();images.append(image)
                 print(f"{len(images)}/{len(jobs)} {image['name']} {image['distro']}: {image['status']}",flush=True)
         evidence_file.write_text(json.dumps({'images':images,'database':database}))
     # Rebuild display fields from original SPDX, including during local evidence reuse.
     for image in images:
+        image['packageURL'] = image_package_url(image['reference'])
         for platform in image['platforms']:
             if platform['status']=='available':
                 spdx=json.loads((ROOT/'static'/platform['sbom']).read_text())
                 platform['packages']=packages(spdx)
                 platform['noticeFiles']=notice_files(spdx)
-    # Upstream scratch images have no usable dependency inventory. Read shipped
-    # notices independently from /licenses in their final filesystem.
+    # Read shipped notices for every publisher, independently of SBOM availability.
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
         pending=[]
         for image in images:
-            if image['reference'].startswith('ghcr.io/cloudnative-pg/'):
-                for platform in image['platforms']:
-                    pending.append((platform, pool.submit(container_notices,
-                        image['reference'], platform['architecture'], platform['digest'], CACHE)))
+            for platform in image['platforms']:
+                pending.append((platform, pool.submit(container_notices,
+                    image['reference'], platform['architecture'], platform['digest'], CACHE)))
         for platform, future in pending:
             platform['containerNotices']=future.result()
     entries=[]
@@ -280,7 +317,7 @@ def main():
         text=recipe['readme'].read_text()
         soup=BeautifulSoup(markdown.markdown(text),'html.parser');first=soup.find('p')
         description=first.get_text(' ',strip=True) if first else name
-        entry={'name':name,'title':recipe['meta'].get('sql_name',name),'description':description,'publisher':publisher,'build':'PGRX' if recipe['build'].lower()=='pgrx' else recipe['build'].capitalize(),
+        entry={'name':name,'title':name,'sqlName':recipe['meta'].get('sql_name',''),'description':description,'publisher':publisher,'build':'PGRX' if recipe['build'].lower()=='pgrx' else recipe['build'].capitalize(),
             'source':f"https://github.com/{repo}/blob/main/{recipe['path']}", 'variants':variants,
             'version':variants[0]['version'],'distros':sorted({i['distro'] for i in variants}),'pgVersions':sorted({i['pg'] for i in variants}),
             'declaredLicenses':recipe['meta'].get('licenses',[])}
@@ -288,7 +325,15 @@ def main():
         directory=content/name;directory.mkdir(exist_ok=True)
         fm={'title':entry['title'],'description':description,'extension':name,'layout':'extension'}
         body=readme_html(text,repo,recipe['commit'],recipe['path'],routes)
-        (directory/'index.md').write_text('---\n'+yaml.safe_dump(fm,sort_keys=False)+'---\n'+body+'\n')
+        (directory/'index.md').unlink(missing_ok=True)
+        fm['type'] = 'extensions'
+        (directory/'_index.md').write_text('---\n'+yaml.safe_dump(fm,sort_keys=False)+'---\n'+body+'\n')
+        for view in ('overview', 'documentation', 'dependencies', 'licenses'):
+            tab_directory = directory/view
+            tab_directory.mkdir(exist_ok=True)
+            tab_fm = dict(fm, view=view)
+            tab_body=readme_html(text,repo,recipe['commit'],recipe['path'],routes,depth=3)
+            (tab_directory/'index.md').write_text('---\n'+yaml.safe_dump(tab_fm,sort_keys=False)+'---\n'+tab_body+'\n')
     result={'generatedAt':NOW,'sourceRefreshedAt':source_refreshed_at,'commits':commits,'count':len(entries),'extensions':entries,'database':database}
     (ROOT/'data').mkdir(exist_ok=True)
     (ROOT/'data/generated.json').write_text(json.dumps(result))
@@ -298,9 +343,9 @@ def main():
     readme=(CACHE/'source/README.md').read_text()
     requirements='## Requirements'+readme.split('## Requirements',1)[1].split('\n---',1)[0]
     quick=readme.split('## Quick start',1)[1].split('\n## Supported Extensions',1)[0].strip().rstrip('-\n')
-    (ROOT/'content/getting-started.md').write_text('---\ntitle: Get started\ndescription: Configure alerts, install the catalog, and enable extensions in your databases.\n---\n'+
-        '<p class="source-note">From the <a href="https://github.com/cnpg-extensions/postgres-extensions-containers/blob/'+commits['source']+'/README.md">project quick start</a>.</p>\n'+
+    (ROOT/'content/getting-started.md').write_text('---\ntitle: Get started\nurl: /get-started/\naliases: [/getting-started/]\ndescription: Configure alerts, install the catalog, and enable extensions in your databases.\n---\n'+
         getting_started(readme_html(requirements+'\n\n'+quick,REPOS['source'],commits['source'],'README.md',routes,depth=1)))
+    subprocess.run([sys.executable, str(ROOT/'scripts/overview_metadata.py')], check=True)
     print(f'Generated {len(entries)} extension pages from {len(images)} catalog images',flush=True)
 
 if __name__=='__main__':main()

@@ -175,8 +175,54 @@ grype sbom:image.spdx.json -o table
 grype sbom:image.spdx.json -o json > vulnerabilities.json
 ```
 
+### RustSec coverage: temporary workaround
+
+Grype can match Rust dependencies against GitHub advisories, but does not yet consume the RustSec database directly. Direct support is tracked in [Grype issue #529](https://github.com/anchore/grype/issues/529). Some RustSec advisories can therefore be missing from Grype results, when using Grype alone.
+
+Until that gap is resolved, install [OSV-Scanner](https://google.github.io/osv-scanner/installation/) and scan the **same, unchanged SBOM** for additional RustSec coverage:
+
+{{< disclosure title="Run OSV-Scanner against the SBOM" >}}
+
+Refresh the Cargo and Debian databases once before scanning. These commands use
+the same database layout as the website build:
+
+```sh
+export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/.cache/osv-local-db"
+for ecosystem in crates.io Debian; do
+  destination="$OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY/osv-scalibr/$ecosystem"
+  mkdir -p "$destination"
+  curl --fail --location "https://osv-vulnerabilities.storage.googleapis.com/$ecosystem/all.zip" -o "$destination/all.zip"
+done
+```
+
+```sh
+osv-scanner scan source --offline -L image.spdx.json
+```
+
+To save a machine-readable report:
+
+Refresh the Cargo and Debian databases once before scanning. These commands use
+the same database layout as the website build:
+
+```sh
+export OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY="$PWD/.cache/osv-local-db"
+for ecosystem in crates.io Debian; do
+  destination="$OSV_SCANNER_LOCAL_DB_CACHE_DIRECTORY/osv-scalibr/$ecosystem"
+  mkdir -p "$destination"
+  curl --fail --location "https://osv-vulnerabilities.storage.googleapis.com/$ecosystem/all.zip" -o "$destination/all.zip"
+done
+```
+
+```sh
+osv-scanner scan source --offline -L image.spdx.json --format json > osv-results.json
+```
+
+Keep the `.spdx.json` filename so OSV-Scanner recognizes the format. It matches package versions against the downloaded databases without network requests; no Cargo.lock or source checkout is needed. Exit code `1` means findings were returned. Refresh the databases before each build; unchanged images can acquire newly disclosed vulnerabilities. A failed refresh makes OSV results unavailable rather than silently using stale data.
+
+{{< /disclosure >}}
+
 ## Rapid updates {#updates}
 
 Catalog refreshes run daily and after successful extension builds. Eligible dependency updates are automated after required checks pass; major updates and cases requiring SQL-version review remain manual. [Read the current update policy](https://github.com/cnpg-extensions/postgres-extensions-containers#automated-dependency-updates).
 
-Your CronJob initiates catalog updates at the start of your maintenance window. It does not impose a rollout end time. Catalog-referencing clusters adopt changed image references; SQL extension upgrades can still need an explicit version change or `ALTER EXTENSION … UPDATE`. [Set up monitoring before scheduling updates](../getting-started/).
+Your CronJob initiates catalog updates at the start of your maintenance window. It does not impose a rollout end time. Catalog-referencing clusters adopt changed image references; SQL extension upgrades can still need an explicit version change or `ALTER EXTENSION … UPDATE`. [Set up monitoring before scheduling updates](../get-started/).
